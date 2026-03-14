@@ -1,0 +1,6 @@
+# Sample aggregate geometry from aggregate_generator_PTSA
+# 3-monomer aggregate (simple test case)
+# Columns: x y z radius (dimensionless, normalized by monomer radius)
+0.000  0.000  0.000  1.000
+2.000  0.000  0.000  1.000
+1.000  1.732  0.000  1.000

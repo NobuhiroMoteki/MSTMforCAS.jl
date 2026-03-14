@@ -1,0 +1,21 @@
+# Julia
+Manifest.toml
+*.jl.cov
+*.jl.mem
+/docs/build/
+
+# Claude Code working notes
+.claude/
+
+# Output data
+*.h5
+*.hdf5
+results/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
