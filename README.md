@@ -295,7 +295,11 @@ All timings on a single core (no MPI, no multi-threading). Julia version: 1.11, 
 
 **Memory**: Julia's higher memory usage is due to garbage collector overhead and less aggressive in-place reuse compared to Fortran. For practical CAS parameter sweeps (N ≤ 1000), memory is not a bottleneck.
 
-**Multi-threading**: The parameter sweep (`run_parameter_sweep`) parallelizes over the (aggregate × refractive_index) grid via `Threads.@threads`. Start Julia with `julia -t auto` or `julia -t N` for speedup. Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section.
+**Multi-threading**: Parallelization is at the **parameter sweep level**, not within a single aggregate computation. `run_parameter_sweep` distributes the (aggregate × refractive_index) job grid across threads via `Threads.@threads`. Start Julia with `julia -t auto` or `julia -t N`.
+
+This task-level parallelism is far more efficient than parallelizing within a single solver call because: (1) each job is fully independent — zero inter-thread communication and synchronization, giving near-linear scaling; (2) intra-solver parallelism (e.g., threading the O(N²) translation loop) would require synchronization at every BiCG iteration, and Amdahl's law limits the practical speedup to 2–5×. For typical CAS parameter sweeps (thousands of jobs across aggregates and refractive indices), task-level parallelism with C cores gives ~C× speedup as long as the number of jobs exceeds C.
+
+Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section.
 
 ## Testing
 
