@@ -98,6 +98,7 @@ src/
 ├── MSTMforCAS.jl          # Top-level module, re-exports public API
 ├── MieCoefficients.jl     # Step 1: Mie scattering coefficients aₙ, bₙ
 ├── TranslationCoefs.jl    # Step 2: VSWF translation addition theorem coefficients
+├── FFTTranslation.jl      # Step 2b: FFT-accelerated translation (O(N+M log M) vs O(N²))
 ├── TMatrixSolver.jl       # Step 3: Multi-sphere interaction equation solver
 ├── ScatteringAmplitude.jl # Step 4: Forward/backward amplitudes + cross sections
 ├── AggregateIO.jl         # Read aggregate geometry files (.ptsa, .pos)
@@ -358,6 +359,7 @@ Match Fortran reference outputs to < 0.01% relative error:
 ## Dependencies
 
 - SpecialFunctions.jl  — spherical Bessel functions
+- FFTW.jl             — FFT for accelerated translation
 - HDF5.jl             — output storage for large parameter sweeps
 - CSV.jl + DataFrames.jl — alternative output format
 - Test (stdlib)        — unit testing
@@ -387,8 +389,9 @@ Match Fortran reference outputs to < 0.01% relative error:
 2. **Medium refractive index**: `n_medium` is passed explicitly as a parameter in the
    Julia API. Internally, k_medium = 2π × n_medium / λ₀ is derived from n_medium and λ₀.
 
-3. **FFT translation**: NOT a development target until testcase1 and testcase2 pass.
-   Implement only direct (exact) translation first.
+3. **FFT translation**: Implemented and validated (testcase3). Uses FFTW.jl for
+   FFT-accelerated translation with O(N + M log M) complexity. Activated via `use_fft=true`.
+   Cell size formula: d_cell = r_mean × (4π/3/fv_target)^{1/3}, grid rounded to 2^a×3^b×5^c.
 
 ## Development Workflow
 

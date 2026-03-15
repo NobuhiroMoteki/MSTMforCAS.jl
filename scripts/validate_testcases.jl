@@ -1,5 +1,5 @@
 """
-Validate Julia MSTM against Fortran reference outputs for testcase1 and testcase2.
+Validate Julia MSTM against Fortran reference outputs for testcase1, testcase2, and testcase3.
 Run with: julia --project=. scripts/validate_testcases.jl
 """
 
@@ -120,3 +120,57 @@ ref2_Qsca = 10.825
     res2.Q_abs, ref2_Qabs, pct(res2.Q_abs, ref2_Qabs))
 @printf("  Q_sca   = %10.4f            %10.4f            %.3f%%\n",
     res2.Q_sca, ref2_Qsca, pct(res2.Q_sca, ref2_Qsca))
+
+# ─── Testcase 3: 1000-sphere aggregate with FFT translation ──────────────
+println()
+println("=" ^ 60)
+println("TESTCASE 3: 1000-sphere aggregate (FFT translation)")
+println("=" ^ 60)
+
+# Same geometry as testcase2, but uses FFT-accelerated translation
+println("N spheres = $N2, x per sphere = $(radii_2[1]), use_fft=true")
+
+t0 = time()
+res3 = compute_scattering(positions_2, radii_2, m_rel_2; use_fft=true)
+dt3 = time() - t0
+
+println("Elapsed: $(round(dt3, digits=1)) s, converged=$(res3.converged), iters=$(res3.n_iterations)")
+println()
+println("  Quantity    Julia             Fortran(FFT)      %err")
+println("  ─────────────────────────────────────────────────────")
+
+# Fortran testcase3 reference (FFT translation)
+ref3_S1f = ComplexF64(261.5, -181.3)
+ref3_S2f = ComplexF64(261.9, -181.6)
+ref3_S3f = ComplexF64(-0.6812, -1.650)
+ref3_S4f = ComplexF64(0.4180, -1.379)
+ref3_S1b = ComplexF64(2.366, -7.300)
+ref3_S2b = ComplexF64(-1.460, 10.36)
+ref3_Qext = 11.188
+ref3_Qabs = 0.3650
+ref3_Qsca = 10.823
+
+@printf("  S1_fwd  = %10.2f%+10.2fi  %10.2f%+10.2fi  %.3f%%\n",
+    real(res3.S_forward[1]), imag(res3.S_forward[1]),
+    real(ref3_S1f), imag(ref3_S1f), pct(res3.S_forward[1], ref3_S1f))
+@printf("  S2_fwd  = %10.2f%+10.2fi  %10.2f%+10.2fi  %.3f%%\n",
+    real(res3.S_forward[2]), imag(res3.S_forward[2]),
+    real(ref3_S2f), imag(ref3_S2f), pct(res3.S_forward[2], ref3_S2f))
+@printf("  S3_fwd  = %10.4f%+10.4fi  %10.4f%+10.4fi  %.3f%%\n",
+    real(res3.S_forward[3]), imag(res3.S_forward[3]),
+    real(ref3_S3f), imag(ref3_S3f), pct(res3.S_forward[3], ref3_S3f))
+@printf("  S4_fwd  = %10.4f%+10.4fi  %10.4f%+10.4fi  %.3f%%\n",
+    real(res3.S_forward[4]), imag(res3.S_forward[4]),
+    real(ref3_S4f), imag(ref3_S4f), pct(res3.S_forward[4], ref3_S4f))
+@printf("  S1_bwd  = %10.4f%+10.4fi  %10.4f%+10.4fi  %.3f%%\n",
+    real(res3.S_backward[1]), imag(res3.S_backward[1]),
+    real(ref3_S1b), imag(ref3_S1b), pct(res3.S_backward[1], ref3_S1b))
+@printf("  S2_bwd  = %10.4f%+10.4fi  %10.4f%+10.4fi  %.3f%%\n",
+    real(res3.S_backward[2]), imag(res3.S_backward[2]),
+    real(ref3_S2b), imag(ref3_S2b), pct(res3.S_backward[2], ref3_S2b))
+@printf("  Q_ext   = %10.4f            %10.4f            %.3f%%\n",
+    res3.Q_ext, ref3_Qext, pct(res3.Q_ext, ref3_Qext))
+@printf("  Q_abs   = %10.4f            %10.4f            %.3f%%\n",
+    res3.Q_abs, ref3_Qabs, pct(res3.Q_abs, ref3_Qabs))
+@printf("  Q_sca   = %10.4f            %10.4f            %.3f%%\n",
+    res3.Q_sca, ref3_Qsca, pct(res3.Q_sca, ref3_Qsca))

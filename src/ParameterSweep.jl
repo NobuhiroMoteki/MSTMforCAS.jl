@@ -80,11 +80,12 @@ function compute_scattering(
     m_rel  ::ComplexF64,
     k      ::Float64;
     tol    ::Float64 = 1e-6,
-    max_iter::Int    = 200
+    max_iter::Int    = 200,
+    use_fft::Bool    = false
 )::ScatteringResult
     positions_x = agg.positions .* k   # dimensionless (size parameters)
     radii_x     = agg.radii     .* k
-    return compute_scattering(positions_x, radii_x, m_rel; tol=tol, max_iter=max_iter)
+    return compute_scattering(positions_x, radii_x, m_rel; tol=tol, max_iter=max_iter, use_fft=use_fft)
 end
 
 # ─────────────────────────────────────────────────────────────

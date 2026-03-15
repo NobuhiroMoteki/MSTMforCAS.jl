@@ -30,6 +30,7 @@ using SpecialFunctions
 # Sub-modules — loaded in dependency order
 include("MieCoefficients.jl")
 include("TranslationCoefs.jl")
+include("FFTTranslation.jl")
 include("TMatrixSolver.jl")
 include("ScatteringAmplitude.jl")
 include("AggregateIO.jl")

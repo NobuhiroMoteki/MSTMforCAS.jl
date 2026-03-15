@@ -412,7 +412,8 @@ function compute_scattering(
     radii::Vector{Float64},
     m_rel::ComplexF64;
     tol::Float64 = 1e-6,
-    max_iter::Int = 200
+    max_iter::Int = 200,
+    use_fft::Bool = false
 )::ScatteringResult
 
     N = length(radii)
@@ -420,7 +421,7 @@ function compute_scattering(
     # ── Solve T-matrix interaction equation ──────────────────────────────────
     # Returns: amn (neqns, 2) lr-tran flat coefficients, rhs (neqns, 2) incident
     amn, converged, n_iter = solve_tmatrix(
-        positions, radii, m_rel; tol=tol, max_iter=max_iter
+        positions, radii, m_rel; tol=tol, max_iter=max_iter, use_fft=use_fft
     )
 
     # We also need the incident RHS — recompute it from the same code path

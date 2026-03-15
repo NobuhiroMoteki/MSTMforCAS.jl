@@ -352,7 +352,8 @@ function solve_tmatrix(
     m_rel::ComplexF64;
     tol::Float64 = 1e-6,
     max_iter::Int = 200,
-    normalize_error::Bool = true
+    normalize_error::Bool = true,
+    use_fft::Bool = false
 )::Tuple{Matrix{ComplexF64}, Bool, Int}
 
     N = length(radii)
@@ -417,18 +418,38 @@ function solve_tmatrix(
     tmp_T  = zeros(ComplexF64, neqns)
     tmp_A  = zeros(ComplexF64, neqns)
 
+    # FFT translation setup (if enabled)
+    fft_data = nothing
+    anode_buf = Array{ComplexF64}(undef, 0, 0, 0, 0, 0)
+    gnode_buf = Array{ComplexF64}(undef, 0, 0, 0, 0, 0)
+    if use_fft && N >= 2
+        fft_data = init_fft_grid(positions, radii, nois)
+        nx, ny, nz = fft_data.cell_dim
+        nb = fft_data.nblk_node
+        anode_buf = zeros(ComplexF64, nx, ny, nz, nb, 2)
+        gnode_buf = zeros(ComplexF64, nx, ny, nz, nb, 2)
+    end
+
+    # Unified A operator: FFT or direct
+    function _apply_A_unified!(out_vec, inp_vec)
+        if fft_data !== nothing
+            apply_A_fft!(out_vec, inp_vec, positions, fft_data,
+                         offsets, half_nblks, nois, anode_buf, gnode_buf)
+        else
+            _apply_A!(out_vec, inp_vec, positions, offsets, half_nblks, nois)
+        end
+    end
+
     # apply_L!(out, inp): out = (I - T*A)*inp
     function apply_L!(out::Vector{ComplexF64}, inp::Vector{ComplexF64})
         fill!(tmp_A, zero(ComplexF64))
-        _apply_A!(tmp_A, inp, positions, offsets, half_nblks, nois)
+        _apply_A_unified!(tmp_A, inp)
         fill!(tmp_T, zero(ComplexF64))
         _apply_T!(tmp_T, tmp_A, mie_vecs, offsets, half_nblks, nois)
         @. out = inp - tmp_T
     end
 
     # apply_Lstar!(out, inp): out = (I - H^H * T^H)*inp
-    # Fortran CBICG backward pass (con_tran=.true.) computes conj(S*H*S * T * conj(inp)).
-    # Since H^H = (S*H*S)^* (VSWF symmetry: H^T = S*H*S), this equals (I - H^H T^H)*inp.
     # Algorithm:
     #   1. ain_t = conj(inp)
     #   2. ain_t = T * ain_t   (T = T^T for diagonal homogeneous spheres)
@@ -450,7 +471,7 @@ function solve_tmatrix(
         end
         # Step 4: H * (S * T * conj(inp))
         fill!(tmp_cA, zero(ComplexF64))
-        _apply_A!(tmp_cA, tmp_cT, positions, offsets, half_nblks, nois)
+        _apply_A_unified!(tmp_cA, tmp_cT)
         # Step 5: apply S in-place to tmp_cA
         for i in 1:N
             _apply_S!(tmp_cA, offsets[i], half_nblks[i], nois[i])
