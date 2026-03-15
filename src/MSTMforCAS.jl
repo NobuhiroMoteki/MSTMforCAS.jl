@@ -50,18 +50,18 @@ Holds the scattering computation output for a single (aggregate, refractive inde
 # Fields
 - `S_forward::NTuple{4, ComplexF64}`: S₁, S₂, S₃, S₄ at θ=0° (BH83 convention)
 - `S_backward::NTuple{4, ComplexF64}`: S₁, S₂, S₃, S₄ at θ=180° (BH83 convention)
-- `C_ext::Float64`: Polarization-averaged extinction cross section
-- `C_abs::Float64`: Polarization-averaged absorption cross section
-- `C_sca::Float64`: Polarization-averaged scattering cross section (= C_ext - C_abs)
+- `Q_ext::Float64`: Polarization-averaged extinction efficiency (dimensionless)
+- `Q_abs::Float64`: Polarization-averaged absorption efficiency (dimensionless)
+- `Q_sca::Float64`: Polarization-averaged scattering efficiency (= Q_ext - Q_abs)
 - `converged::Bool`: Whether the T-matrix iteration converged
 - `n_iterations::Int`: Number of iterations used
 """
 struct ScatteringResult
     S_forward::NTuple{4, ComplexF64}
     S_backward::NTuple{4, ComplexF64}
-    C_ext::Float64
-    C_abs::Float64
-    C_sca::Float64
+    Q_ext::Float64
+    Q_abs::Float64
+    Q_sca::Float64
     converged::Bool
     n_iterations::Int
 end

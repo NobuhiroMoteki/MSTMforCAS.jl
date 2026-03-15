@@ -16,14 +16,38 @@ export compute_mie_coefficients, mie_nmax
 """
     mie_nmax(x::Float64) -> Int
 
-Compute the maximum multipole order needed for convergence.
-Uses Wiscombe's criterion: n_max = x + 4x^{1/3} + 2.
-
-# Arguments
-- `x`: Size parameter (= k * radius, where k is wavenumber in medium)
+Upper bound on multipole order, using MSTM's starting formula: nint(x + 4x^{1/3}) + 5.
+Use mie_nmax(x, m) for the converged (smaller) order.
 """
 function mie_nmax(x::Float64)::Int
-    return ceil(Int, x + 4.0 * x^(1/3) + 2.0)
+    return round(Int, x + 4.0 * x^(1/3)) + 5
+end
+
+"""
+    mie_nmax(x::Float64, m::ComplexF64; eps::Float64=1e-6) -> Int
+
+Converged multipole order using MSTM's mieoa criterion:
+find smallest N such that |partial_Q_ext(N)/total_Q_ext - 1| < eps,
+where partial_Q_ext(N) = (2/x²)Σ_{n=1}^N (2n+1)Re(aₙ+bₙ).
+
+Matches MSTM's default mie_epsilon = 1e-6.
+"""
+function mie_nmax(x::Float64, m::ComplexF64; eps::Float64 = 1e-6)::Int
+    nstop = mie_nmax(x)
+    a, b = compute_mie_coefficients(x, m; nmax=nstop)
+    qext_terms = [(2n+1) * real(a[n] + b[n]) for n in 1:nstop]
+    qext_total = sum(qext_terms)
+    if abs(qext_total) < 1e-30
+        return 1
+    end
+    partial = 0.0
+    for n in 1:nstop
+        partial += qext_terms[n]
+        if abs(1.0 - partial / qext_total) < eps
+            return n
+        end
+    end
+    return nstop
 end
 
 """
@@ -104,21 +128,19 @@ function compute_mie_coefficients(
             chi_curr = chi_next
         end
 
-        xi_curr = Complex(psi_curr, -chi_curr)  # ξₙ = ψₙ - i·χₙ  (BH83 convention)
+        # ξₙ = ψₙ + i·χₙ  where χₙ = x·yₙ(x), so χ₀ = -cos(x)  (BH83 convention)
+        xi_curr = Complex(psi_curr, chi_curr)
+        xi_prev = Complex(psi_prev, chi_prev)
 
-        # BH83 Eq. 4.53
-        dn = D[n+1]  # Dₙ(mx), index shifted because D[1] = D₀
-        # Wait: D[n] from recurrence corresponds to Dₙ₋₁, need to check indexing
-        # Actually D[n+1] should be Dₙ after the downward recurrence above
-        # (D[nmx+1] = 0 starting point, recurrence fills D[nmx] down to D[1])
-        # D[1] = D₀, D[2] = D₁, ..., D[n+1] = Dₙ ✓
+        # BH83 Eq. 4.53; D[1]=D₀, D[2]=D₁, ..., D[n+1]=Dₙ
+        dn = D[n+1]
 
         an_num = (dn / m + n / x) * psi_curr - psi_prev
-        an_den = (dn / m + n / x) * xi_curr - Complex(psi_prev, -chi_prev)
+        an_den = (dn / m + n / x) * xi_curr - xi_prev
         a[n] = an_num / an_den
 
         bn_num = (m * dn + n / x) * psi_curr - psi_prev
-        bn_den = (m * dn + n / x) * xi_curr - Complex(psi_prev, -chi_prev)
+        bn_den = (m * dn + n / x) * xi_curr - xi_prev
         b[n] = bn_num / bn_den
     end
 

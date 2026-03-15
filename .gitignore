@@ -7,7 +7,11 @@ Manifest.toml
 # Claude Code working notes
 .claude/
 
+# Reference materials (Fortran MSTM source, papers, etc.)
+ref/
+
 # Output data
+*.csv
 *.h5
 *.hdf5
 results/
