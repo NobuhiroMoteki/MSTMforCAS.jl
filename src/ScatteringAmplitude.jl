@@ -394,7 +394,9 @@ end
         radii::Vector{Float64},
         m_rel::ComplexF64;
         tol::Float64 = 1e-6,
-        max_iter::Int = 200
+        max_iter::Int = 200,
+        use_fft::Bool = false,
+        truncation_order::Union{Int,Nothing} = nothing
     ) -> ScatteringResult
 
 Compute multi-sphere scattering amplitudes and cross sections.
@@ -403,6 +405,7 @@ Compute multi-sphere scattering amplitudes and cross sections.
 - `positions`: [3, N] sphere centers (dimensionless: k_medium × physical_pos)
 - `radii`: [N] sphere size parameters x_i = k_medium × r_i
 - `m_rel`: complex refractive index m_sphere / m_medium
+- `truncation_order`: if specified, use this VSWF truncation order for all spheres
 
 # Returns
 `ScatteringResult` with BH83 amplitudes S₁–S₄ at forward/backward and Q efficiencies.
@@ -413,20 +416,25 @@ function compute_scattering(
     m_rel::ComplexF64;
     tol::Float64 = 1e-6,
     max_iter::Int = 200,
-    use_fft::Bool = false
+    use_fft::Bool = false,
+    truncation_order::Union{Int,Nothing} = nothing
 )::ScatteringResult
 
     N = length(radii)
 
     # ── Solve T-matrix interaction equation ──────────────────────────────────
     # Returns: amn (neqns, 2) lr-tran flat coefficients, rhs (neqns, 2) incident
-    amn, converged, n_iter = solve_tmatrix(
-        positions, radii, m_rel; tol=tol, max_iter=max_iter, use_fft=use_fft
+    amn, converged, n_iter, noi_max = solve_tmatrix(
+        positions, radii, m_rel; tol=tol, max_iter=max_iter, use_fft=use_fft,
+        truncation_order=truncation_order
     )
 
     # We also need the incident RHS — recompute it from the same code path
     # (solve_tmatrix doesn't return rhs, so reproduce it here)
-    nois       = [_mie_order(r, m_rel) for r in radii]
+    # Use the same truncation_order logic as solve_tmatrix
+    nois = [let noi_auto = _mie_order(r, m_rel)
+                truncation_order !== nothing ? max(truncation_order, noi_auto) : noi_auto
+            end for r in radii]
     half_nblks = [noi * (noi + 2) for noi in nois]
     nblks      = [2 * h for h in half_nblks]
     offsets    = Vector{Int}(undef, N)
@@ -498,6 +506,7 @@ function compute_scattering(
         Q_abs,
         Q_sca,
         converged,
-        n_iter
+        n_iter,
+        noi_max
     )
 end

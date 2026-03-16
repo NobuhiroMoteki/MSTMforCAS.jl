@@ -469,13 +469,14 @@ end
 #   ephim_buf : Vector{ComplexF64}, length ≥ 2*wmax_global+1
 #   fn_buf    : Vector{ComplexF64}, length ≥ wmax_global+1   (Hankel or Bessel)
 #   ymn_buf   : Matrix{Float64},   size (2*wmax_global+1, wmax_global+1)
+#   fywt_buf  : Matrix{ComplexF64}, size (2*wmax_global+1, wmax_global+1)
 # where wmax_global = nmax_s + nmax_t.
 # ─────────────────────────────────────────────────────────────
 
 """
     apply_translation_mvp!(out, inp, off_t, hnb_t, off_s, hnb_s,
                             r_ij, nmax_s, nmax_t,
-                            ephim_buf, fn_buf, ymn_buf;
+                            ephim_buf, fn_buf, ymn_buf, fywt_buf;
                             use_regular=false)
 
 Compute `out += H_{ij} * inp` in-place without allocating the translation matrix H.
@@ -500,7 +501,8 @@ function apply_translation_mvp!(
     nmax_t   ::Int,
     ephim_buf::Vector{ComplexF64},
     fn_buf   ::Vector{ComplexF64},
-    ymn_buf  ::Matrix{Float64};
+    ymn_buf  ::Matrix{Float64},
+    fywt_buf ::Matrix{ComplexF64};
     use_regular::Bool = false
 )
     nodrmax     = max(nmax_s, nmax_t)
@@ -537,10 +539,18 @@ function apply_translation_mvp!(
         _hankel_upward!(fn_buf, wmax_global, z)
     end
 
+    # ── Pre-combine fn_buf * ymn_buf (pair-dependent, loop-independent) ──
+    @inbounds for w in 0:wmax_global
+        fnw = fn_buf[w+1]
+        for vi in 1:(2*wmax_global+1)
+            fywt_buf[vi, w+1] = fnw * ymn_buf[vi, w+1]
+        end
+    end
+
     tc = tcc.tran_coef
 
-    # ── Fused translation + MVP ──
-    for n in 1:nmax_s
+    # ── Fused translation + MVP (even/odd w split for branchless inner loops) ──
+    @inbounds for n in 1:nmax_s
         for m in -n:n
             mn  = n*(n+1) + m
             v1  = inp[off_s + mn]           # p=1
@@ -551,17 +561,18 @@ function apply_translation_mvp!(
                     kl   = l*(l+1) + k
                     v    = m - k
                     wmin = max(abs(v), abs(n-l))
+                    vi   = v + wmax_global + 1
                     a    = zero(ComplexF64)
                     b    = zero(ComplexF64)
-                    for w in wmax_local:-1:wmin
-                        ywt = fn_buf[w+1] * ymn_buf[v+wmax_global+1, w+1] * tc[kl, mn, w+1]
-                        if (wmax_local - w) % 2 == 0
-                            a += ywt
-                        else
-                            b += ywt
-                        end
+                    # Even terms: (wmax_local - w) even → w has same parity as wmax_local
+                    for w in wmax_local:-2:wmin
+                        a += fywt_buf[vi, w+1] * tc[kl, mn, w+1]
                     end
-                    ep = ephim_buf[v+wmax_global+1]
+                    # Odd terms: (wmax_local - w) odd → w has opposite parity
+                    for w in (wmax_local-1):-2:wmin
+                        b += fywt_buf[vi, w+1] * tc[kl, mn, w+1]
+                    end
+                    ep = ephim_buf[vi]
                     h1 = ep * (a + im*b)
                     h2 = ep * (a - im*b)
                     out[off_t + kl]         += h1 * v1

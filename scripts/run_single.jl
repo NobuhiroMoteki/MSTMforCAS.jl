@@ -1,6 +1,9 @@
 """
 Single aggregate scattering computation example.
-Run with: julia --project=. scripts/run_single.jl
+Run with: julia --project=. scripts/run_single.jl [--fft] [--truncation-order N]
+
+  --fft                : use FFT-accelerated translation (faster for N > ~100 spheres)
+  --truncation-order N : override automatic VSWF truncation order (use N for all spheres)
 
 Usage:
   compute_scattering(positions_x, radii_x, m_rel)
@@ -16,6 +19,14 @@ Usage:
 
 using MSTMforCAS, Printf
 
+use_fft = "--fft" in ARGS
+truncation_order = nothing
+for (i, arg) in enumerate(ARGS)
+    if arg == "--truncation-order" && i < length(ARGS)
+        truncation_order = parse(Int, ARGS[i+1])
+    end
+end
+
 # ─── Physical parameters ──────────────────────────────────────────────────
 wavelength = 0.6328   # [μm] He-Ne laser
 n_medium   = 1.0      # air
@@ -30,11 +41,11 @@ m_rel    = m_sphere / n_medium           # relative RI
 #   Np=20  → ~1 s
 #   Np=50  → ~5 s
 #   Np=100 → ~30 s
-ptsa_dir = joinpath(@__DIR__, "..", "ref", "MSTM-v4.0_for_CAS",
-                    "code", "aggregate_ptsa_files")
+ptsa_dir = joinpath(@__DIR__, "..", "data", "aggregates",
+                    "ptsa_files")
 
-# Pick a small one (Np=20)
-files = filter(f -> contains(f, "Np=00020"), readdir(ptsa_dir, join=true))
+# Pick a small one (Np=100)
+files = filter(f -> contains(f, "Np=00100"), readdir(ptsa_dir, join=true))
 aggfile = first(files)
 
 println("Aggregate file: $(basename(aggfile))")
@@ -50,12 +61,12 @@ R_ve = cbrt(sum(r^3 for r in agg.radii))   # [μm]
 println()
 
 # ─── Compute scattering ──────────────────────────────────────────────────
-println("Computing...")
+println("Computing (use_fft=$use_fft, truncation_order=$(truncation_order === nothing ? "auto" : truncation_order))...")
 t0 = time()
-result = compute_scattering(agg, m_rel, k_medium)
+result = compute_scattering(agg, m_rel, k_medium; use_fft=use_fft, truncation_order=truncation_order)
 dt = time() - t0
 println("Elapsed: $(round(dt, digits=2)) s")
-println("Converged: $(result.converged), iterations: $(result.n_iterations)")
+println("Converged: $(result.converged), iterations: $(result.n_iterations), truncation_order: $(result.truncation_order)")
 println()
 
 # ─── Print results ────────────────────────────────────────────────────────

@@ -40,8 +40,11 @@ include("ParameterSweep.jl")
 export compute_mie_coefficients
 export compute_scattering           # single aggregate, single refractive index
 export run_parameter_sweep          # batch computation
-export read_aggregate_file          # I/O
+export write_results_hdf5          # write DataFrame to HDF5
+export read_aggregate_file          # I/O: .ptsa/.pos text files
+export read_aggregate_catalog       # I/O: HDF5 + CSV catalog (aggregate_generator_PTSA)
 export ScatteringResult             # output data structure
+export AggregateGeometry            # aggregate geometry + metadata
 
 """
     ScatteringResult
@@ -56,6 +59,7 @@ Holds the scattering computation output for a single (aggregate, refractive inde
 - `Q_sca::Float64`: Polarization-averaged scattering efficiency (= Q_ext - Q_abs)
 - `converged::Bool`: Whether the T-matrix iteration converged
 - `n_iterations::Int`: Number of iterations used
+- `truncation_order::Int`: Maximum VSWF truncation order used across all spheres
 """
 struct ScatteringResult
     S_forward::NTuple{4, ComplexF64}
@@ -65,6 +69,7 @@ struct ScatteringResult
     Q_sca::Float64
     converged::Bool
     n_iterations::Int
+    truncation_order::Int
 end
 
 end # module MSTMforCAS

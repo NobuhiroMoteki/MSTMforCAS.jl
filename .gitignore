@@ -10,6 +10,9 @@ Manifest.toml
 # Reference materials (Fortran MSTM source, papers, etc.)
 ref/
 
+# Data (aggregates + results — too large for git)
+data/
+
 # Output data
 *.csv
 *.h5

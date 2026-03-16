@@ -1,6 +1,6 @@
 """
 Read sweep results from CSV file.
-Run with: julia --project=. scripts/read_results_csv.jl results_small_sweep.csv
+Run with: julia --project=. scripts/read_results_csv.jl results.csv
 """
 
 using CSV, DataFrames, Printf
@@ -25,22 +25,24 @@ println()
 
 # ─── Summary table ──────────────────────────────────────────────────────
 println("Summary (all rows, Q values for unpolarized incidence):")
-println("  aggregate_file                           n_mono  R_ve         m_real       m_imag       Q_ext        Q_abs        Q_sca        conv  iter")
-println("  " * "─"^140)
+println("  source                                   mean_rp   Df    Np  agg  R_ve         m_real       m_imag       Q_ext        Q_abs        Q_sca        conv  iter  norder")
+println("  " * "─"^175)
 for row in eachrow(df)
-    @printf("  %-40s  %4d  %12.4e  %12.4e  %12.4e  %12.4e  %12.4e  %12.4e  %4s  %4d\n",
-        row.aggregate_file[1:min(40,end)],
-        row.n_monomers, row.R_ve, row.m_real, row.m_imag,
+    @printf("  %-40s  %.4f  %4.2f  %4d  %3d  %12.4e  %12.4e  %12.4e  %12.4e  %12.4e  %12.4e  %4s  %4d  %4d\n",
+        row.source[1:min(40,end)],
+        row.mean_rp, row.Df, row.n_monomers, row.agg_num,
+        row.R_ve, row.m_real, row.m_imag,
         row.Q_ext, row.Q_abs, row.Q_sca,
-        row.converged ? "Y" : "N", row.n_iterations)
+        row.converged ? "Y" : "N", row.n_iterations, row.truncation_order)
 end
 println()
 
 # ─── Forward scattering amplitudes (first 5 rows) ──────────────────────
 println("Forward scattering amplitudes (first 5 rows):")
 for row in eachrow(first(df, 5))
-    @printf("  %s  m=(%.4e+%.4ei)  R_ve=%.4e\n",
-        row.aggregate_file[1:min(40,end)], row.m_real, row.m_imag, row.R_ve)
+    @printf("  %s  m=(%.4e+%.4ei)  Np=%d  Df=%.2f  R_ve=%.4e\n",
+        row.source[1:min(40,end)], row.m_real, row.m_imag,
+        row.n_monomers, row.Df, row.R_ve)
     println("    BH83 (dimensionless):")
     @printf("      S1 = %+13.6e %+13.6ei\n", row.S1_fwd_re, row.S1_fwd_im)
     @printf("      S2 = %+13.6e %+13.6ei\n", row.S2_fwd_re, row.S2_fwd_im)

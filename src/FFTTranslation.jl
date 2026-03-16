@@ -389,7 +389,7 @@ function _sphere_to_node!(
     N = length(offsets)
     nblk_node = fft_data.nblk_node
 
-    for i in 1:N
+    @inbounds for i in 1:N
         off = offsets[i]
         hnb = half_nblks[i]
         H = fft_data.sphere_node_H[i]  # (nblk_node, hnb, 2)
@@ -427,7 +427,7 @@ function _node_to_sphere!(
     N = length(offsets)
     nblk_node = fft_data.nblk_node
 
-    for i in 1:N
+    @inbounds for i in 1:N
         off = offsets[i]
         hnb = half_nblks[i]
         H = fft_data.node_sphere_H[i]  # (hnb, nblk_node, 2)
@@ -449,25 +449,23 @@ function _node_to_sphere!(
 end
 
 """
-    _fft_node_to_node!(gnode, anode, fft_data)
+    _fft_node_to_node!(gnode, anode, fft_data, aft, gft, ifft_buf)
 
 Perform FFT-based node-to-node translation (convolution in frequency domain).
+Work buffers `aft`, `gft`, `ifft_buf` should be pre-allocated for reuse across iterations.
 """
 function _fft_node_to_node!(
     gnode::Array{ComplexF64, 5},
     anode::Array{ComplexF64, 5},
-    fft_data::FFTGridData
+    fft_data::FFTGridData,
+    aft::Array{ComplexF64, 3},
+    gft::Array{ComplexF64, 4},
+    ifft_buf::Array{ComplexF64, 3}
 )
     nx, ny, nz = fft_data.cell_dim
     nblk = fft_data.nblk_node
-    ncells8 = 8 * nx * ny * nz
 
     fill!(gnode, zero(ComplexF64))
-
-    # Work arrays for FFT
-    aft  = zeros(ComplexF64, 2nx, 2ny, 2nz)
-    gft  = zeros(ComplexF64, 2nx, 2ny, 2nz, nblk)
-    ifft_buf = zeros(ComplexF64, 2nx, 2ny, 2nz)  # temp buffer for IFFT
 
     for p in 1:2
         tran = p == 1 ? fft_data.cell_tran_fft_p1 : fft_data.cell_tran_fft_p2
@@ -476,13 +474,13 @@ function _fft_node_to_node!(
         for n in 1:nblk
             # Zero-pad input: copy cell_dim block into 2× grid
             fill!(aft, zero(ComplexF64))
-            aft[1:nx, 1:ny, 1:nz] .= anode[1:nx, 1:ny, 1:nz, n, p]
+            @inbounds aft[1:nx, 1:ny, 1:nz] .= anode[1:nx, 1:ny, 1:nz, n, p]
 
             # Forward FFT
             fft_data.fft_plan * aft
 
             # Multiply by pre-FFT'd translation matrix and accumulate
-            for l in 1:nblk
+            @inbounds for l in 1:nblk
                 tran_ln = @view tran[:, :, :, l, n]
                 gft_l = @view gft[:, :, :, l]
                 @. gft_l += tran_ln * aft
@@ -491,11 +489,11 @@ function _fft_node_to_node!(
 
         # Inverse FFT for each target multipole (use temp buffer for FFTW compatibility)
         for l in 1:nblk
-            ifft_buf .= @view gft[:, :, :, l]
+            @inbounds ifft_buf .= @view gft[:, :, :, l]
             fft_data.ifft_plan * ifft_buf
 
             # Extract first cell_dim block (discard zero-padding)
-            gnode[1:nx, 1:ny, 1:nz, l, p] .+= ifft_buf[1:nx, 1:ny, 1:nz]
+            @inbounds gnode[1:nx, 1:ny, 1:nz, l, p] .+= ifft_buf[1:nx, 1:ny, 1:nz]
         end
     end
 end
@@ -522,6 +520,7 @@ function _nearfield_direct!(
     ephim_buf = Vector{ComplexF64}(undef, 2*wmax_global + 1)
     fn_buf    = Vector{ComplexF64}(undef, wmax_global + 1)
     ymn_buf   = Matrix{Float64}(undef, 2*wmax_global + 1, wmax_global + 1)
+    fywt_buf  = Matrix{ComplexF64}(undef, 2*wmax_global + 1, wmax_global + 1)
     r_ij      = Vector{Float64}(undef, 3)
 
     for i in 1:N
@@ -541,7 +540,7 @@ function _nearfield_direct!(
             apply_translation_mvp!(
                 out, inp, off_i, hnb_i, off_j, hnb_j,
                 r_ij, noi_j, noi_i,
-                ephim_buf, fn_buf, ymn_buf
+                ephim_buf, fn_buf, ymn_buf, fywt_buf
             )
         end
     end
@@ -553,9 +552,10 @@ end
 
 """
     apply_A_fft!(out, inp, positions, fft_data, offsets, half_nblks, nois,
-                 anode_buf, gnode_buf)
+                 anode_buf, gnode_buf, fft_aft, fft_gft, fft_ifft_buf)
 
 FFT-accelerated translation operator. Drop-in replacement for `_apply_A!`.
+Work buffers `fft_aft`, `fft_gft`, `fft_ifft_buf` are pre-allocated for reuse.
 """
 function apply_A_fft!(
     out::Vector{ComplexF64},
@@ -566,13 +566,16 @@ function apply_A_fft!(
     half_nblks::Vector{Int},
     nois::Vector{Int},
     anode_buf::Array{ComplexF64, 5},
-    gnode_buf::Array{ComplexF64, 5}
+    gnode_buf::Array{ComplexF64, 5},
+    fft_aft::Array{ComplexF64, 3},
+    fft_gft::Array{ComplexF64, 4},
+    fft_ifft_buf::Array{ComplexF64, 3}
 )
     # Step 1: Sphere → Node
     _sphere_to_node!(anode_buf, inp, fft_data, offsets, half_nblks, nois)
 
     # Step 2: FFT node-to-node convolution
-    _fft_node_to_node!(gnode_buf, anode_buf, fft_data)
+    _fft_node_to_node!(gnode_buf, anode_buf, fft_data, fft_aft, fft_gft, fft_ifft_buf)
 
     # Step 3: Node → Sphere
     _node_to_sphere!(out, gnode_buf, fft_data, offsets, half_nblks, nois)

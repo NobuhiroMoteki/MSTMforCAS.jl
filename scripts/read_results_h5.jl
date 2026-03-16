@@ -1,6 +1,6 @@
 """
 Read sweep results from HDF5 file.
-Run with: julia --project=. scripts/read_results_h5.jl results_small_sweep.h5
+Run with: julia --project=. scripts/read_results_h5.jl results.h5
 """
 
 using HDF5, Printf
@@ -31,9 +31,14 @@ h5open(h5file, "r") do fid
     println()
 
     # ─── Read core arrays ───────────────────────────────────────────────
-    aggregate_file = read(fid["aggregate_file"])
+    source         = read(fid["source"])
+    mean_rp        = read(fid["mean_rp"])
+    Df             = read(fid["Df"])
     n_monomers     = read(fid["n_monomers"])
+    agg_num        = read(fid["agg_num"])
     R_ve           = read(fid["R_ve"])
+    wavelength     = read(fid["wavelength"])
+    medium_ri      = read(fid["medium_refindex"])
     m_real         = read(fid["m_real"])
     m_imag         = read(fid["m_imag"])
     Q_ext          = read(fid["Q_ext"])
@@ -41,6 +46,7 @@ h5open(h5file, "r") do fid
     Q_sca          = read(fid["Q_sca"])
     converged      = read(fid["converged"])
     n_iterations   = read(fid["n_iterations"])
+    trunc_order    = read(fid["truncation_order"])
 
     # ─── BH83 forward scattering amplitudes ─────────────────────────────
     S1_fwd = read(fid["S1_fwd_re"]) .+ im .* read(fid["S1_fwd_im"])
@@ -54,36 +60,27 @@ h5open(h5file, "r") do fid
     S12_fwd = read(fid["S12_fwd_re"]) .+ im .* read(fid["S12_fwd_im"])
     S21_fwd = read(fid["S21_fwd_re"]) .+ im .* read(fid["S21_fwd_im"])
 
-    # ─── BH83 backward scattering amplitudes ────────────────────────────
-    S1_bwd = read(fid["S1_bwd_re"]) .+ im .* read(fid["S1_bwd_im"])
-    S2_bwd = read(fid["S2_bwd_re"]) .+ im .* read(fid["S2_bwd_im"])
-    S3_bwd = read(fid["S3_bwd_re"]) .+ im .* read(fid["S3_bwd_im"])
-    S4_bwd = read(fid["S4_bwd_re"]) .+ im .* read(fid["S4_bwd_im"])
-
-    # ─── MI02 backward scattering amplitudes ────────────────────────────
-    S11_bwd = read(fid["S11_bwd_re"]) .+ im .* read(fid["S11_bwd_im"])
-    S22_bwd = read(fid["S22_bwd_re"]) .+ im .* read(fid["S22_bwd_im"])
-    S12_bwd = read(fid["S12_bwd_re"]) .+ im .* read(fid["S12_bwd_im"])
-    S21_bwd = read(fid["S21_bwd_re"]) .+ im .* read(fid["S21_bwd_im"])
-
     # ─── Summary table ──────────────────────────────────────────────────
     println("Summary (all rows, Q values for unpolarized incidence):")
-    println("  aggregate_file                           n_mono  R_ve         m_real       m_imag       Q_ext        Q_abs        Q_sca        conv  iter")
-    println("  " * "─"^140)
+    println("  source                                   wl       n_med  mean_rp   Df    Np  agg  R_ve         m_real       m_imag       Q_ext        Q_abs        Q_sca        conv  iter  norder")
+    println("  " * "─"^200)
     for i in 1:n_rows
-        @printf("  %-40s  %4d  %12.4e  %12.4e  %12.4e  %12.4e  %12.4e  %12.4e  %4s  %4d\n",
-            aggregate_file[i][1:min(40,end)],
-            n_monomers[i], R_ve[i], m_real[i], m_imag[i],
+        @printf("  %-40s  %.4f  %.4f  %.4f  %4.2f  %4d  %3d  %12.4e  %12.4e  %12.4e  %12.4e  %12.4e  %12.4e  %4s  %4d  %4d\n",
+            source[i][1:min(40,end)],
+            wavelength[i], medium_ri[i],
+            mean_rp[i], Df[i], n_monomers[i], agg_num[i],
+            R_ve[i], m_real[i], m_imag[i],
             Q_ext[i], Q_abs[i], Q_sca[i],
-            converged[i] ? "Y" : "N", n_iterations[i])
+            converged[i] ? "Y" : "N", n_iterations[i], trunc_order[i])
     end
     println()
 
     # ─── Forward scattering amplitudes (first 5 rows) ───────────────────
     println("Forward scattering amplitudes (first 5 rows):")
     for i in 1:min(5, n_rows)
-        @printf("  %s  m=(%.4e+%.4ei)  R_ve=%.4e\n",
-            aggregate_file[i][1:min(40,end)], m_real[i], m_imag[i], R_ve[i])
+        @printf("  %s  m=(%.4e+%.4ei)  Np=%d  Df=%.2f  R_ve=%.4e\n",
+            source[i][1:min(40,end)], m_real[i], m_imag[i],
+            n_monomers[i], Df[i], R_ve[i])
         println("    BH83 (dimensionless):")
         @printf("      S1 = %+13.6e %+13.6ei\n", real(S1_fwd[i]), imag(S1_fwd[i]))
         @printf("      S2 = %+13.6e %+13.6ei\n", real(S2_fwd[i]), imag(S2_fwd[i]))

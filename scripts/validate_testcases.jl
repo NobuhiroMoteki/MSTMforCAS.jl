@@ -22,7 +22,7 @@ t0 = time()
 res1 = compute_scattering(positions_1, radii_1, m_rel_1)
 dt1 = time() - t0
 
-println("Elapsed: $(round(dt1, digits=2)) s, converged=$(res1.converged), iters=$(res1.n_iterations)")
+println("Elapsed: $(round(dt1, digits=2)) s, converged=$(res1.converged), iters=$(res1.n_iterations), truncation_order=$(res1.truncation_order)")
 println()
 println("  Quantity    Julia            Fortran          %err")
 println("  ────────────────────────────────────────────────────")
@@ -68,7 +68,7 @@ println("TESTCASE 2: 1000-sphere aggregate")
 println("=" ^ 60)
 
 # Read geometry: length_scale_factor = 1.0, all r=1.0
-pos_file = joinpath(@__DIR__, "..", "ref", "MSTM-v4.0_for_CAS", "code", "random_in_cylinder_1000.pos")
+pos_file = joinpath(@__DIR__, "..", "test", "fixtures", "random_in_cylinder_1000.pos")
 data = readdlm(pos_file)   # 1000 × 4 matrix: x y z r
 N2 = size(data, 1)
 positions_2 = Matrix{Float64}(data[:, 1:3]')   # 3 × N
@@ -81,7 +81,7 @@ t0 = time()
 res2 = compute_scattering(positions_2, radii_2, m_rel_2)
 dt2 = time() - t0
 
-println("Elapsed: $(round(dt2, digits=1)) s, converged=$(res2.converged), iters=$(res2.n_iterations)")
+println("Elapsed: $(round(dt2, digits=1)) s, converged=$(res2.converged), iters=$(res2.n_iterations), truncation_order=$(res2.truncation_order)")
 println()
 println("  Quantity    Julia             Fortran           %err")
 println("  ─────────────────────────────────────────────────────")
@@ -134,7 +134,7 @@ t0 = time()
 res3 = compute_scattering(positions_2, radii_2, m_rel_2; use_fft=true)
 dt3 = time() - t0
 
-println("Elapsed: $(round(dt3, digits=1)) s, converged=$(res3.converged), iters=$(res3.n_iterations)")
+println("Elapsed: $(round(dt3, digits=1)) s, converged=$(res3.converged), iters=$(res3.n_iterations), truncation_order=$(res3.truncation_order)")
 println()
 println("  Quantity    Julia             Fortran(FFT)      %err")
 println("  ─────────────────────────────────────────────────────")

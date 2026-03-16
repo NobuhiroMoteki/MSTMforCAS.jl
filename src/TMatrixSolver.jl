@@ -126,7 +126,7 @@ function _apply_T!(
     nois::Vector{Int}
 )
     N = length(nois)
-    for i in 1:N
+    @inbounds for i in 1:N
         off  = offsets[i]
         hnb  = half_nblks[i]
         noi  = nois[i]
@@ -154,7 +154,7 @@ end
 # ─────────────────────────────────────────────────────────────
 
 function _apply_S!(v::Vector{ComplexF64}, off::Int, hnb::Int, noi::Int)
-    for n in 1:noi
+    @inbounds for n in 1:noi
         sign = 1
         for m in 1:n
             sign = -sign            # sign = (-1)^m
@@ -202,6 +202,7 @@ function _apply_A!(
     ephim_buf = Vector{ComplexF64}(undef, 2*wmax_global + 1)
     fn_buf    = Vector{ComplexF64}(undef, wmax_global + 1)
     ymn_buf   = Matrix{Float64}(undef, 2*wmax_global + 1, wmax_global + 1)
+    fywt_buf  = Matrix{ComplexF64}(undef, 2*wmax_global + 1, wmax_global + 1)
     r_ij      = Vector{Float64}(undef, 3)
 
     for i in 1:N
@@ -222,7 +223,7 @@ function _apply_A!(
             apply_translation_mvp!(
                 out, inp, off_i, hnb_i, off_j, hnb_j,
                 r_ij, noi_j, noi_i,
-                ephim_buf, fn_buf, ymn_buf
+                ephim_buf, fn_buf, ymn_buf, fywt_buf
             )
         end
     end
@@ -329,8 +330,10 @@ end
         m_rel::ComplexF64;
         tol::Float64 = 1e-6,
         max_iter::Int = 200,
-        normalize_error::Bool = true
-    ) -> (amn, converged, n_iter)
+        normalize_error::Bool = true,
+        use_fft::Bool = false,
+        truncation_order::Union{Int,Nothing} = nothing
+    ) -> (amn, converged, n_iter, noi_max)
 
 Solve the multi-sphere T-matrix interaction equation using CBICG.
 
@@ -338,6 +341,8 @@ Solve the multi-sphere T-matrix interaction equation using CBICG.
 - `positions`: [3, N] sphere center coordinates, already dimensionless (scaled by k_medium)
 - `radii`: [N] sphere radii, already dimensionless (size parameters x_i = k_medium * r_i)
 - `m_rel`: complex refractive index ratio (sphere / medium)
+- `truncation_order`: if specified, use this VSWF truncation order for all spheres
+  instead of automatic determination. Must be ≥ the auto-determined order.
 
 # Returns
 - `amn`: Matrix{ComplexF64} of size (neqns, 2), solution coefficients for polarizations q=1,2.
@@ -345,6 +350,7 @@ Solve the multi-sphere T-matrix interaction equation using CBICG.
   concatenated over all spheres in order i=1..N.
 - `converged`: true if both polarizations converged within tolerance
 - `n_iter`: maximum iteration count used across both polarizations
+- `noi_max`: maximum VSWF truncation order actually used
 """
 function solve_tmatrix(
     positions::Matrix{Float64},
@@ -353,8 +359,9 @@ function solve_tmatrix(
     tol::Float64 = 1e-6,
     max_iter::Int = 200,
     normalize_error::Bool = true,
-    use_fft::Bool = false
-)::Tuple{Matrix{ComplexF64}, Bool, Int}
+    use_fft::Bool = false,
+    truncation_order::Union{Int,Nothing} = nothing
+)::Tuple{Matrix{ComplexF64}, Bool, Int, Int}
 
     N = length(radii)
     @assert size(positions, 1) == 3
@@ -367,7 +374,8 @@ function solve_tmatrix(
     offsets    = Vector{Int}(undef, N)   # 0-based offset in the global flat vector
 
     for i in 1:N
-        nois[i]       = _mie_order(radii[i], m_rel)
+        noi_auto = _mie_order(radii[i], m_rel)
+        nois[i]       = truncation_order !== nothing ? max(truncation_order, noi_auto) : noi_auto
         half_nblks[i] = nois[i] * (nois[i] + 2)
         nblks[i]      = 2 * half_nblks[i]
     end
@@ -422,19 +430,26 @@ function solve_tmatrix(
     fft_data = nothing
     anode_buf = Array{ComplexF64}(undef, 0, 0, 0, 0, 0)
     gnode_buf = Array{ComplexF64}(undef, 0, 0, 0, 0, 0)
+    fft_aft_buf = Array{ComplexF64}(undef, 0, 0, 0)
+    fft_gft_buf = Array{ComplexF64}(undef, 0, 0, 0, 0)
+    fft_ifft_buf = Array{ComplexF64}(undef, 0, 0, 0)
     if use_fft && N >= 2
         fft_data = init_fft_grid(positions, radii, nois)
         nx, ny, nz = fft_data.cell_dim
         nb = fft_data.nblk_node
         anode_buf = zeros(ComplexF64, nx, ny, nz, nb, 2)
         gnode_buf = zeros(ComplexF64, nx, ny, nz, nb, 2)
+        fft_aft_buf = zeros(ComplexF64, 2nx, 2ny, 2nz)
+        fft_gft_buf = zeros(ComplexF64, 2nx, 2ny, 2nz, nb)
+        fft_ifft_buf = zeros(ComplexF64, 2nx, 2ny, 2nz)
     end
 
     # Unified A operator: FFT or direct
     function _apply_A_unified!(out_vec, inp_vec)
         if fft_data !== nothing
             apply_A_fft!(out_vec, inp_vec, positions, fft_data,
-                         offsets, half_nblks, nois, anode_buf, gnode_buf)
+                         offsets, half_nblks, nois, anode_buf, gnode_buf,
+                         fft_aft_buf, fft_gft_buf, fft_ifft_buf)
         else
             _apply_A!(out_vec, inp_vec, positions, offsets, half_nblks, nois)
         end
@@ -459,12 +474,13 @@ function solve_tmatrix(
     #   6. out = inp - conj(aout_t)
     tmp_cT = zeros(ComplexF64, neqns)
     tmp_cA = zeros(ComplexF64, neqns)
+    conj_inp_buf = zeros(ComplexF64, neqns)
 
     function apply_Lstar!(out::Vector{ComplexF64}, inp::Vector{ComplexF64})
         # Step 1-2: T * conj(inp)
-        conj_inp = conj.(inp)
+        @. conj_inp_buf = conj(inp)
         fill!(tmp_cT, zero(ComplexF64))
-        _apply_T!(tmp_cT, conj_inp, mie_vecs, offsets, half_nblks, nois)
+        _apply_T!(tmp_cT, conj_inp_buf, mie_vecs, offsets, half_nblks, nois)
         # Step 3: apply S in-place to tmp_cT
         for i in 1:N
             _apply_S!(tmp_cT, offsets[i], half_nblks[i], nois[i])
@@ -512,5 +528,5 @@ function solve_tmatrix(
         n_iter_max      = max(n_iter_max, iters)
     end
 
-    return (amn, converged_both, n_iter_max)
+    return (amn, converged_both, n_iter_max, maximum(nois))
 end
