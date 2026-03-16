@@ -4,8 +4,9 @@ Manifest.toml
 *.jl.mem
 /docs/build/
 
-# Claude Code working notes
+# Claude Code
 .claude/
+CLAUDE.md
 
 # Reference materials (Fortran MSTM source, papers, etc.)
 ref/
