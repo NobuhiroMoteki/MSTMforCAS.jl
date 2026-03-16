@@ -26,7 +26,7 @@ For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie 
 \begin{pmatrix} E_{\parallel}^{\mathrm{sca}} \\ E_{\perp}^{\mathrm{sca}} \end{pmatrix} = \frac{e^{ikr}}{-ikr} \begin{pmatrix} S_2 & S_3 \\ S_4 & S_1 \end{pmatrix} \begin{pmatrix} E_{\parallel}^{\mathrm{inc}} \\ E_{\perp}^{\mathrm{inc}} \end{pmatrix}
 ```
 
-where $S_1, S_2, S_3, S_4$ are dimensionless complex scattering amplitudes.
+where $`S_1, S_2, S_3, S_4`$ are dimensionless complex scattering amplitudes.
 
 **MI02** = Mishchenko, Travis & Lacis (2002). Conversion from BH83:
 
@@ -34,7 +34,7 @@ where $S_1, S_2, S_3, S_4$ are dimensionless complex scattering amplitudes.
 S_{11}^{\mathrm{MI02}} = \frac{S_2^{\mathrm{BH83}}}{-ik}, \quad S_{12}^{\mathrm{MI02}} = \frac{S_3^{\mathrm{BH83}}}{ik}, \quad S_{21}^{\mathrm{MI02}} = \frac{S_4^{\mathrm{BH83}}}{ik}, \quad S_{22}^{\mathrm{MI02}} = \frac{S_1^{\mathrm{BH83}}}{-ik}
 ```
 
-where $k = k_{\mathrm{medium}} = 2\pi n_{\mathrm{medium}} / \lambda_0$ is the wavenumber in the medium. The MI02 amplitudes have dimension of length.
+where $`k = k_{\mathrm{medium}} = 2\pi n_{\mathrm{medium}} / \lambda_0`$ is the wavenumber in the medium. The MI02 amplitudes have dimension of length.
 
 **Efficiency factors**:
 
@@ -42,7 +42,7 @@ where $k = k_{\mathrm{medium}} = 2\pi n_{\mathrm{medium}} / \lambda_0$ is the wa
 Q = \frac{C}{\pi R_{\mathrm{ve}}^2}, \qquad R_{\mathrm{ve}} = \left(\sum_i r_i^3\right)^{1/3}
 ```
 
-where $C$ is the cross section and $R_{\rm ve}$ is the volume-equivalent sphere radius.
+where $`C`$ is the cross section and $`R_{\rm ve}`$ is the volume-equivalent sphere radius.
 
 ## Installation
 
