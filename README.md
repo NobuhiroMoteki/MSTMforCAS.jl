@@ -18,6 +18,8 @@ For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie 
   - Forward/backward scattering amplitude matrix S₁–S₄ (BH83 convention, dimensionless) and S₁₁, S₂₂, S₁₂, S₂₁ (MI02 convention, dimension of length)
   - Polarization-averaged efficiency factors Q_ext, Q_abs, Q_sca (unpolarized incidence)
 
+**Note on particle orientation:** MSTMforCAS does not internally support rotation of aggregate orientation. To compute scattering at different orientations, apply the desired rotation to the aggregate geometry file (.ptsa/.pos) before passing it to the code.
+
 ### Convention definitions
 
 **BH83** = Bohren & Huffman (1983), Eq. 3.12. The amplitude matrix relates scattered to incident field:
@@ -79,7 +81,7 @@ All length inputs (positions, radii, wavelength) must be given in **the same phy
 
 The sweep covers the full Cartesian product: **aggregates × medium_conditions × m_real × m_imag**.
 
-**VSWF truncation order**: By default, the truncation order N for each sphere is determined automatically from the size parameter x using the Wiscombe criterion: N = round(x + 4x^{1/3}) + 5, refined by a convergence check on the Mie efficiencies. Typical values: N=4 for x=1.0, N=5 for x=1.5. To override, pass `truncation_order=N` (applied uniformly to all spheres; if smaller than the auto-determined value, the auto value is used as a floor). The actual truncation order used is reported in the output as `truncation_order`.
+**VSWF truncation order**: By default, the truncation order N for each sphere is determined automatically from the size parameter x using the Wiscombe criterion: $`N = \mathrm{round}(x + 4x^{1/3}) + 5`$, refined by a convergence check on the Mie efficiencies. Typical values: N=4 for x=1.0, N=5 for x=1.5. To override, pass `truncation_order=N` (applied uniformly to all spheres; if smaller than the auto-determined value, the auto value is used as a floor). The actual truncation order used is reported in the output as `truncation_order`.
 
 ### Aggregate geometry input
 

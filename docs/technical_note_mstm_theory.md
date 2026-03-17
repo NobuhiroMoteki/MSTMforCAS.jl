@@ -158,7 +158,9 @@ For large numbers of spheres ($`N_S \gtrsim 100`$), the direct pairwise evaluati
 ```
 
 where $`\mu`$ and $`\nu`$ represent the combined multipole indices. $`\hat{H}_{\mu\nu}(\mathbf{k})`$ is the pre-computed 3D FFT of the cell-to-cell translation matrix (excluding the neighbour-hole cells), $`\hat{a}_\nu(\mathbf{k})`$ is the FFT of the zero-padded node coefficient field, and the product is taken element-wise per index pair $`(\mu, \nu)`$.  The use of a doubled grid ($`2N_x \times 2N_y \times 2N_z`$) with zero-padding avoids circular convolution artefacts.
+
 5. **Node → Sphere.** The resulting node-level exciting field is translated back to each sphere position via the reverse regular translation.
+
 6. **Near-field correction.** Direct sphere-to-sphere Hankel-type translation is applied for all sphere pairs within the neighbour-hole region (step 2), adding these contributions to the FFT-based far-field result.
 
 The total cost per iteration becomes $`O(N_S + M \log M)`$ where $`M`$ is the number of active grid cells, compared with $`O(N_S^2 N_\mathrm{max}^4)`$ for the direct algorithm.  The memory overhead consists of the pre-FFT'd translation matrices, which scale as $`O(M \times N_\mathrm{node}^2)`$ where $`N_\mathrm{node}`$ is the node multipole order.  Mackowski & Kolokolova (2022) report speed improvements exceeding two orders of magnitude for systems of $`10^3`$–$`10^4`$ spheres.
