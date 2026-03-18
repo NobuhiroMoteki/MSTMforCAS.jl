@@ -4,7 +4,7 @@ Julia implementation of the Multi-Sphere T-Matrix (MSTM) method, specialized for
 
 ## Purpose
 
-Generate surrogate model training data by computing light scattering properties of fractal aggregates of homogeneous spheres, with parameter sweeps over monomer count, fractal dimension, complex refractive index, wavelength, and medium refractive index.
+Compute numerically exact light scattering solutions for particles consisting of multiple homogeneous spheres (possibly of different sizes) at high speed. This package re-implements, from scratch in Julia, the subset of [Mackowski's MSTM v4.0](https://github.com/dmckwski/MSTM) (Fortran/MPI) functionality required for Complex Amplitude Sensing (CAS). In practice, the code is well suited for parameter sweeps over wavelength, medium refractive index, particle refractive index, and particle morphology (e.g., fractal dimension of aggregates).
 
 Reference implementation: [MSTM-v4.0_for_CAS](https://github.com/NobuhiroMoteki/MSTM-v4.0_for_CAS) (Fortran/MPI).
 
@@ -16,7 +16,7 @@ For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie 
 - Aggregates of homogeneous spheres (each monomer with its own radius, common complex refractive index)
 - Output per (aggregate, medium condition, refractive index) combination:
   - Forward/backward scattering amplitude matrix S₁–S₄ (BH83 convention, dimensionless) and S₁₁, S₂₂, S₁₂, S₂₁ (MI02 convention, dimension of length)
-  - Polarization-averaged efficiency factors Q_ext, Q_abs, Q_sca (unpolarized incidence)
+  - Polarization-averaged efficiency factors $Q_\mathrm{ext}$, $Q_\mathrm{abs}$, $Q_\mathrm{sca}$ (unpolarized incidence)
 
 **Note on particle orientation:** MSTMforCAS does not internally support rotation of aggregate orientation. To compute scattering at different orientations, apply the desired rotation to the aggregate geometry file (.ptsa/.pos) before passing it to the code.
 
@@ -28,7 +28,7 @@ For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie 
 \begin{pmatrix} E_{\parallel}^{\mathrm{sca}} \\ E_{\perp}^{\mathrm{sca}} \end{pmatrix} = \frac{e^{ikr}}{-ikr} \begin{pmatrix} S_2 & S_3 \\ S_4 & S_1 \end{pmatrix} \begin{pmatrix} E_{\parallel}^{\mathrm{inc}} \\ E_{\perp}^{\mathrm{inc}} \end{pmatrix}
 ```
 
-where $`S_1, S_2, S_3, S_4`$ are dimensionless complex scattering amplitudes.
+where $S_1, S_2, S_3, S_4$ are dimensionless complex scattering amplitudes.
 
 **MI02** = Mishchenko, Travis & Lacis (2002). Conversion from BH83:
 
@@ -36,7 +36,7 @@ where $`S_1, S_2, S_3, S_4`$ are dimensionless complex scattering amplitudes.
 S_{11}^{\mathrm{MI02}} = \frac{S_2^{\mathrm{BH83}}}{-ik}, \quad S_{12}^{\mathrm{MI02}} = \frac{S_3^{\mathrm{BH83}}}{ik}, \quad S_{21}^{\mathrm{MI02}} = \frac{S_4^{\mathrm{BH83}}}{ik}, \quad S_{22}^{\mathrm{MI02}} = \frac{S_1^{\mathrm{BH83}}}{-ik}
 ```
 
-where $`k = k_{\mathrm{medium}} = 2\pi n_{\mathrm{medium}} / \lambda_0`$ is the wavenumber in the medium. The MI02 amplitudes have dimension of length.
+where $k = k_{\mathrm{medium}} = 2\pi n_{\mathrm{medium}} / \lambda_0$ is the wavenumber in the medium. The MI02 amplitudes have dimension of length.
 
 **Efficiency factors**:
 
@@ -44,7 +44,7 @@ where $`k = k_{\mathrm{medium}} = 2\pi n_{\mathrm{medium}} / \lambda_0`$ is the 
 Q = \frac{C}{\pi R_{\mathrm{ve}}^2}, \qquad R_{\mathrm{ve}} = \left(\sum_i r_i^3\right)^{1/3}
 ```
 
-where $`C`$ is the cross section and $`R_{\rm ve}`$ is the volume-equivalent sphere radius.
+where $C$ is the cross section and $R_{\rm ve}$ is the volume-equivalent sphere radius.
 
 ## Installation
 
@@ -81,7 +81,7 @@ All length inputs (positions, radii, wavelength) must be given in **the same phy
 
 The sweep covers the full Cartesian product: **aggregates × medium_conditions × m_real × m_imag**.
 
-**VSWF truncation order**: By default, the truncation order N for each sphere is determined automatically from the size parameter x using the Wiscombe criterion: $`N = \mathrm{round}(x + 4x^{1/3}) + 5`$, refined by a convergence check on the Mie efficiencies. Typical values: N=4 for x=1.0, N=5 for x=1.5. To override, pass `truncation_order=N` (applied uniformly to all spheres; if smaller than the auto-determined value, the auto value is used as a floor). The actual truncation order used is reported in the output as `truncation_order`.
+**VSWF truncation order**: By default, the truncation order N for each sphere is determined automatically from the size parameter x using the Wiscombe criterion: $N = \mathrm{round}(x + 4x^{1/3}) + 5$, refined by a convergence check on the Mie efficiencies. Typical values: N=4 for x=1.0, N=5 for x=1.5. To override, pass `truncation_order=N` (applied uniformly to all spheres; if smaller than the auto-determined value, the auto value is used as a floor). The actual truncation order used is reported in the output as `truncation_order`.
 
 ### Aggregate geometry input
 
@@ -259,7 +259,7 @@ Same structure as forward with `_bwd` suffix (16 columns total).
 
 **Unit note for MI02 amplitudes**: The MI02 amplitude unit [length] is the same as the wavelength and coordinate unit. For example, if `wavelength` is in μm, then S₁₁ etc. are in μm.
 
-**Physical cross sections** are not stored in the output, but can be computed as: C = Q × π × R_ve² (same length unit squared).
+**Physical cross sections** are not stored in the output, but can be computed as: $C = Q \times \pi \times R_\mathrm{ve}^2$ (same length unit squared).
 
 ### Reading output files
 
@@ -400,13 +400,13 @@ MSTMforCAS.jl/
 
 Validated against Fortran MSTM-v4.0_for_CAS reference output. All primary quantities agree to < 0.1%.
 
-| Test case | Spheres | Translation | Q_ext %err | Q_abs %err | Q_sca %err | S₁ fwd %err | S₂ fwd %err | Iterations |
+| Test case | Spheres | Translation | $Q_\mathrm{ext}$ %err | $Q_\mathrm{abs}$ %err | $Q_\mathrm{sca}$ %err | S₁ fwd %err | S₂ fwd %err | Iterations |
 |-----------|---------|------------|------------|------------|------------|-------------|-------------|------------|
 | testcase1 | 2       | direct     | 0.001%     | 0.050%     | 0.015%     | 0.014%      | 0.001%      | 3          |
 | testcase2 | 1000    | direct     | 0.003%     | 0.017%     | 0.001%     | 0.021%      | 0.016%      | 18         |
 | testcase3 | 1000    | FFT        | 0.001%     | 1.6%       | 0.056%     | 0.024%      | 0.007%      | 18         |
 
-Testcase3 uses the same geometry and refractive index as testcase2 but with FFT-accelerated translation. The larger Q_abs error (1.6%) is expected because Q_abs = Q_ext − Q_sca is a small residual (Q_abs ≈ 0.37 vs Q_ext ≈ 11.2), amplifying the FFT approximation error. The Fortran FFT reference shows the same effect.
+Testcase3 uses the same geometry and refractive index as testcase2 but with FFT-accelerated translation. The larger $Q_\mathrm{abs}$ error (1.6%) is expected because $Q_\mathrm{abs} = Q_\mathrm{ext} - Q_\mathrm{sca}$ is a small residual ($Q_\mathrm{abs} \approx 0.37$ vs $Q_\mathrm{ext} \approx 11.2$), amplifying the FFT approximation error. The Fortran FFT reference shows the same effect.
 
 Run validation:
 
