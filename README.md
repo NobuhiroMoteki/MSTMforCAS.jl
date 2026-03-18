@@ -8,7 +8,7 @@ Generate surrogate model training data by computing light scattering properties 
 
 Reference implementation: [MSTM-v4.0_for_CAS](https://github.com/NobuhiroMoteki/MSTM-v4.0_for_CAS) (Fortran/MPI).
 
-For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie coefficients, translation addition theorem, multi-sphere interaction equation, CBICG solver, and output quantities), see [docs/technical_note_mstm_theory.md](docs/technical_note_mstm_theory.md).
+For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie coefficients, translation addition theorem, multi-sphere interaction equation, CBICG solver, and output quantities), see [docs/technical_note_mstm_theory.pdf](docs/technical_note_mstm_theory.pdf).
 
 ## Physical Scope
 
