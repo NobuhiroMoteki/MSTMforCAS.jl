@@ -1,6 +1,7 @@
 # Technical Note: Multi-Sphere T-Matrix Theory — Mathematical Formulation and Computational Implementation
 
 **Author:** N. Moteki
+
 **Last updated:** 2026-03-18 (corresponds to MSTMforCAS.jl v0.1.1)
 
 This document provides a self-contained description of the mathematical theory behind the Multi-Sphere T-Matrix (MSTM) method as implemented in MSTMforCAS.jl. It covers the VSWF expansion formalism, Lorenz–Mie theory for single spheres, the multi-sphere interaction equation, VSWF translation addition theorem, the Complex BiConjugate Gradient (CBICG) iterative solver, the FFT-accelerated translation algorithm, and the output quantities (scattering amplitudes and cross-section efficiencies). The implementation follows the formulation of Mackowski (1991, 1994, 1996), Xu (1996), Mackowski & Mishchenko (2011), and Mackowski & Kolokolova (2022). Scattering amplitude conventions follow Bohren & Huffman (1983, hereafter BH83).
