@@ -24,6 +24,15 @@ results/
 .DS_Store
 Thumbs.db
 
+# LaTeX build artifacts
+*.aux
+*.log
+*.fls
+*.fdb_latexmk
+*.out
+*.toc
+*.synctex.gz
+
 # IDE
 .vscode/
 .idea/
