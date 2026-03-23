@@ -304,7 +304,7 @@ function run_parameter_sweep(
     n_done      = Threads.Atomic{Int}(0)
     io_lock     = ReentrantLock()
     save_buf    = NamedTuple[]
-    flush_every = max(100, n_jobs ÷ 1000)
+    flush_every = max(Threads.nthreads() * 2, 100)
     t_sw        = time()
 
     # ── Parallel sweep ────────────────────────────────────────────────────────
