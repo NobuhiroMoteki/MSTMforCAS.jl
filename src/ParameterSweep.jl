@@ -139,10 +139,9 @@ function _h5_init!(path::String, config::SweepConfig)
         HDF5.attrs(fid)["m_real_range"] = Float64[config.m_real_range...]
         HDF5.attrs(fid)["m_imag_range"] = Float64[config.m_imag_range...]
 
-        ulim = HDF5.API.H5S_UNLIMITED
         for (col, T) in _SWEEP_COLS
             HDF5.create_dataset(fid, col, HDF5.datatype(T),
-                HDF5.dataspace((0,), (ulim,)); chunk=(_H5_CHUNK,))
+                HDF5.dataspace((0,), (-1,)); chunk=(_H5_CHUNK,))
         end
     end
 end
