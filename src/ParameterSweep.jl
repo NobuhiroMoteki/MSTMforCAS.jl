@@ -78,10 +78,12 @@ function _make_ri_grid(config::SweepConfig)::Vector{ComplexF64}
     return grid
 end
 
-_fmt_hms(s::Float64) = isfinite(s) ?
-    let h, r = divrem(round(Int, s), 3600); m, sec = divrem(r, 60)
-        @sprintf("%02d:%02d:%02d", h, m, sec)
-    end : "--:--:--"
+function _fmt_hms(s::Float64)
+    isfinite(s) || return "--:--:--"
+    h, r  = divrem(round(Int, s), 3600)
+    m, sec = divrem(r, 60)
+    @sprintf("%02d:%02d:%02d", h, m, sec)
+end
 
 # ─────────────────────────────────────────────────────────────
 # HDF5 incremental I/O helpers
