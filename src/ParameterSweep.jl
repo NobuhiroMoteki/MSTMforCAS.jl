@@ -3,7 +3,8 @@
 
 Orchestrate parameter sweeps over aggregate geometries, medium conditions, and
 refractive indices. Supports multi-threaded parallel execution via Julia's
-Threads.@threads. Supports automatic resume: if the output CSV already exists,
+Threads.@threads. Results are written incrementally to HDF5 for safety and
+memory efficiency. Supports automatic resume: if the output HDF5 already exists,
 completed jobs are skipped and only remaining jobs are computed.
 
 # Typical usage
@@ -15,7 +16,7 @@ config = SweepConfig(
     m_real_range = (1.5, 1.7, 3),   # min, max, n_grid
     m_imag_range = (0.0, 0.1, 2),   # min, max, n_grid
 )
-df = run_parameter_sweep(aggregates, config; output_file="results.csv")
+run_parameter_sweep(aggregates, config; output_h5="results.h5")
 ```
 
 # Threading notes
@@ -23,7 +24,7 @@ The sweep parallelises over the (aggregate × medium_condition × m_real × m_im
 grid with `Threads.@threads`. Start Julia with `julia -t auto` (or `-t N`) for
 speedup. Thread safety: `TranslationCoefs` uses a global cache that is initialised
 by a single-threaded pre-warm step before `@threads` is entered, so all threads
-only read from the cache during the sweep.
+only read from the cache during the sweep. HDF5 writes are serialised via a lock.
 """
 
 export run_parameter_sweep, write_results_hdf5, SweepConfig
@@ -77,6 +78,99 @@ function _make_ri_grid(config::SweepConfig)::Vector{ComplexF64}
     return grid
 end
 
+_fmt_hms(s::Float64) = isfinite(s) ?
+    let h, r = divrem(round(Int, s), 3600); m, sec = divrem(r, 60)
+        @sprintf("%02d:%02d:%02d", h, m, sec)
+    end : "--:--:--"
+
+# ─────────────────────────────────────────────────────────────
+# HDF5 incremental I/O helpers
+# ─────────────────────────────────────────────────────────────
+
+# (column_name, storage_type) — order must match row NamedTuple field order
+const _SWEEP_COLS = Tuple{String,DataType}[
+    ("source",           String),
+    ("mean_rp",          Float64),
+    ("rel_std_rp",       Float64),
+    ("k_f",              Float64),
+    ("Df",               Float64),
+    ("n_monomers",       Int64),
+    ("agg_num",          Int64),
+    ("R_ve",             Float64),
+    ("R_g",              Float64),
+    ("eps_agg",          Float64),
+    ("wavelength",       Float64),
+    ("medium_refindex",  Float64),
+    ("m_real",           Float64),
+    ("m_imag",           Float64),
+    ("S1_fwd_re",        Float64), ("S1_fwd_im",  Float64),
+    ("S2_fwd_re",        Float64), ("S2_fwd_im",  Float64),
+    ("S3_fwd_re",        Float64), ("S3_fwd_im",  Float64),
+    ("S4_fwd_re",        Float64), ("S4_fwd_im",  Float64),
+    ("S11_fwd_re",       Float64), ("S11_fwd_im", Float64),
+    ("S22_fwd_re",       Float64), ("S22_fwd_im", Float64),
+    ("S12_fwd_re",       Float64), ("S12_fwd_im", Float64),
+    ("S21_fwd_re",       Float64), ("S21_fwd_im", Float64),
+    ("S1_bwd_re",        Float64), ("S1_bwd_im",  Float64),
+    ("S2_bwd_re",        Float64), ("S2_bwd_im",  Float64),
+    ("S3_bwd_re",        Float64), ("S3_bwd_im",  Float64),
+    ("S4_bwd_re",        Float64), ("S4_bwd_im",  Float64),
+    ("S11_bwd_re",       Float64), ("S11_bwd_im", Float64),
+    ("S22_bwd_re",       Float64), ("S22_bwd_im", Float64),
+    ("S12_bwd_re",       Float64), ("S12_bwd_im", Float64),
+    ("S21_bwd_re",       Float64), ("S21_bwd_im", Float64),
+    ("Q_ext",            Float64),
+    ("Q_abs",            Float64),
+    ("Q_sca",            Float64),
+    ("converged",        Int8),    # Bool stored as Int8 (0/1)
+    ("n_iterations",     Int64),
+    ("truncation_order", Int64),
+]
+
+const _H5_CHUNK = 10_000   # rows per HDF5 chunk (affects IO and compression granularity)
+
+"""Create a new HDF5 results file with extendable datasets and config metadata."""
+function _h5_init!(path::String, config::SweepConfig)
+    HDF5.h5open(path, "w") do fid
+        wl_vals   = [mc[1] for mc in config.medium_conditions]
+        nmed_vals = [mc[2] for mc in config.medium_conditions]
+        HDF5.attrs(fid)["medium_conditions_wavelength"] = wl_vals
+        HDF5.attrs(fid)["medium_conditions_refindex"]   = nmed_vals
+        HDF5.attrs(fid)["m_real_range"] = Float64[config.m_real_range...]
+        HDF5.attrs(fid)["m_imag_range"] = Float64[config.m_imag_range...]
+
+        ulim = HDF5.API.H5S_UNLIMITED
+        for (col, T) in _SWEEP_COLS
+            HDF5.create_dataset(fid, col, HDF5.datatype(T),
+                HDF5.dataspace((0,), (ulim,)); chunk=(_H5_CHUNK,))
+        end
+    end
+end
+
+"""Append a batch of result rows to an existing HDF5 results file."""
+function _h5_append!(path::String, buf::Vector)
+    isempty(buf) && return
+    n_new = length(buf)
+    HDF5.h5open(path, "r+") do fid
+        for (col, T) in _SWEEP_COLS
+            ds    = fid[col]
+            n_old = size(ds, 1)
+            HDF5.set_extent_dims(ds, (n_old + n_new,))
+            sym  = Symbol(col)
+            vals = if T === Int8
+                Int8[getproperty(row, sym) ? Int8(1) : Int8(0) for row in buf]
+            elseif T === Int64
+                Int64[getproperty(row, sym) for row in buf]
+            elseif T === String
+                String[getproperty(row, sym) for row in buf]
+            else  # Float64
+                Float64[getproperty(row, sym) for row in buf]
+            end
+            ds[(n_old+1):(n_old+n_new)] = vals
+        end
+    end
+end
+
 # ─────────────────────────────────────────────────────────────
 # AggregateGeometry overload of compute_scattering
 # ─────────────────────────────────────────────────────────────
@@ -116,30 +210,28 @@ end
 
 """
     run_parameter_sweep(aggregates::Vector{AggregateGeometry}, config::SweepConfig;
-                        output_file=nothing) -> DataFrame
+                        output_h5=nothing)
 
 Execute a parameter sweep over the Cartesian product:
   aggregates × medium_conditions × m_real_values × m_imag_values.
 
+Results are written incrementally to `output_h5` (HDF5) as computation proceeds,
+so partial results are preserved if the run is interrupted.
+
 # Resume support
-If `output_file` points to an existing CSV file, previously completed jobs are
-loaded and skipped. Only remaining jobs are computed. The merged result (old + new)
-is written back to the same file.
+If `output_h5` points to an existing file, previously completed jobs are
+detected by reading the key columns and skipped automatically.
 
 # Arguments
 - `aggregates`: Vector of `AggregateGeometry` (e.g., from `read_aggregate_catalog`)
 - `config`: `SweepConfig` with medium conditions, RI ranges, etc.
-- `output_file`: Optional path for CSV or HDF5 output
-
-# Returns
-`DataFrame` with one row per (aggregate, medium_condition, m) combination,
-including aggregate metadata, scattering amplitudes, and efficiency factors.
+- `output_h5`: Path for HDF5 output (created or appended to)
 """
 function run_parameter_sweep(
     aggregates::Vector{AggregateGeometry},
     config::SweepConfig;
-    output_file::Union{String,Nothing} = nothing
-)::DataFrame
+    output_h5::Union{String,Nothing} = nothing
+)::Nothing
 
     ri_grid = _make_ri_grid(config)
     n_agg   = length(aggregates)
@@ -148,30 +240,30 @@ function run_parameter_sweep(
     n_jobs_total = n_agg * n_mc * n_mrel
 
     if n_jobs_total == 0
-        return DataFrame()
+        return nothing
     end
 
     # ── Check for existing results (resume support) ──────────────────────────
-    df_existing = DataFrame()
     completed_keys = Set{Tuple{String, Float64, Float64, Float64, Float64}}()
 
-    if output_file !== nothing && endswith(output_file, ".csv") && isfile(output_file)
-        df_tmp = CSV.read(output_file, DataFrame)
-        required_cols = (:source, :wavelength, :medium_refindex, :m_real, :m_imag)
-        if all(c -> hasproperty(df_tmp, c), required_cols)
-            df_existing = df_tmp
-            for row in eachrow(df_existing)
-                push!(completed_keys, (row.source, row.wavelength, row.medium_refindex,
-                                       row.m_real, row.m_imag))
+    if output_h5 !== nothing && isfile(output_h5)
+        HDF5.h5open(output_h5, "r") do fid
+            if haskey(fid, "source") && size(fid["source"], 1) > 0
+                sources  = read(fid["source"])
+                wls      = read(fid["wavelength"])
+                n_meds   = read(fid["medium_refindex"])
+                m_reals  = read(fid["m_real"])
+                m_imags  = read(fid["m_imag"])
+                for i in eachindex(sources)
+                    push!(completed_keys,
+                        (sources[i], wls[i], n_meds[i], m_reals[i], m_imags[i]))
+                end
+                @info "Resume: found $(length(completed_keys)) completed jobs in $(basename(output_h5))"
             end
-            @info "Resume: found $(length(completed_keys)) completed jobs in $(basename(output_file))"
-        else
-            @warn "Existing $(basename(output_file)) has incompatible format (missing columns); ignoring and recomputing all jobs."
         end
     end
 
     # ── Build job grid, excluding completed jobs ─────────────────────────────
-    # Each job: (aggregate_index, medium_condition_index, ri_index)
     grid = Tuple{Int,Int,Int}[]
     for ai in 1:n_agg, mci in 1:n_mc, mi in 1:n_mrel
         wl, n_med = config.medium_conditions[mci]
@@ -182,15 +274,20 @@ function run_parameter_sweep(
         end
     end
 
-    n_jobs = length(grid)
+    n_jobs    = length(grid)
+    n_skipped = n_jobs_total - n_jobs
+
     if n_jobs == 0
         @info "All $n_jobs_total jobs already completed. Nothing to compute."
-        return df_existing
+        return nothing
     end
-
-    n_skipped = n_jobs_total - n_jobs
     if n_skipped > 0
         @info "Resuming: $n_skipped jobs already done, $n_jobs remaining"
+    end
+
+    # ── Initialize HDF5 file if needed ──────────────────────────────────────
+    if output_h5 !== nothing && !isfile(output_h5)
+        _h5_init!(output_h5, config)
     end
 
     # ── Pre-warm global caches (single-threaded, must run before @threads) ──
@@ -204,8 +301,12 @@ function run_parameter_sweep(
             use_fft=config.use_fft, truncation_order=config.truncation_order)
     end
 
-    # ── Pre-allocate result rows ─────────────────────────────────────────────
-    rows = Vector{NamedTuple}(undef, n_jobs)
+    # ── Progress + incremental HDF5 save ─────────────────────────────────────
+    n_done      = Threads.Atomic{Int}(0)
+    io_lock     = ReentrantLock()
+    save_buf    = NamedTuple[]
+    flush_every = max(100, n_jobs ÷ 1000)
+    t_sw        = time()
 
     # ── Parallel sweep ────────────────────────────────────────────────────────
     Threads.@threads for idx in 1:n_jobs
@@ -227,7 +328,7 @@ function run_parameter_sweep(
         S11_bwd = r.S_backward[2] / (-ik); S22_bwd = r.S_backward[1] / (-ik)
         S12_bwd = r.S_backward[3] / (ik);  S21_bwd = r.S_backward[4] / (ik)
 
-        rows[idx] = (
+        local row = (
             # Aggregate metadata — source
             source     = agg.source,
             # Aggregate metadata — constant parameters
@@ -277,35 +378,39 @@ function run_parameter_sweep(
             n_iterations     = r.n_iterations,
             truncation_order = r.truncation_order,
         )
-    end
 
-    df_new = DataFrame(rows)
-
-    # ── Merge with existing results ──────────────────────────────────────────
-    df = nrow(df_existing) > 0 ? vcat(df_existing, df_new) : df_new
-
-    # ── Write output ─────────────────────────────────────────────────────────
-    if output_file !== nothing
-        if endswith(output_file, ".csv")
-            CSV.write(output_file, df)
-        elseif endswith(output_file, ".h5") || endswith(output_file, ".hdf5")
-            _write_sweep_hdf5(df, output_file, config)
-        else
-            @warn "Unknown extension for output_file=\"$output_file\"; skipping write."
+        done = Threads.atomic_add!(n_done, 1) + 1
+        lock(io_lock) do
+            push!(save_buf, row)
+            if length(save_buf) >= flush_every || done == n_jobs
+                elapsed = time() - t_sw
+                rate    = elapsed > 0 ? done / elapsed : 0.0
+                eta_s   = rate > 0 ? (n_jobs - done) / rate : Inf
+                @printf("\r  [elapsed %s | ETA %s]  %d / %d  (%.1f%%)  %.1f jobs/s   ",
+                    _fmt_hms(elapsed), _fmt_hms(eta_s),
+                    done + n_skipped, n_jobs_total,
+                    100.0 * (done + n_skipped) / n_jobs_total,
+                    rate)
+                if output_h5 !== nothing
+                    _h5_append!(output_h5, save_buf)
+                end
+                empty!(save_buf)
+            end
         end
     end
+    println()  # end progress line
 
-    return df
+    return nothing
 end
 
 # ─────────────────────────────────────────────────────────────
-# HDF5 writer
+# Utility: read HDF5 results into a DataFrame
 # ─────────────────────────────────────────────────────────────
 
 """
     write_results_hdf5(df::DataFrame, path::String, config::SweepConfig)
 
-Write sweep results DataFrame to HDF5 format.
+Write sweep results DataFrame to HDF5 format (one-shot, for post-processing use).
 Each column is stored as a 1-D dataset; sweep config metadata is stored as root attributes.
 """
 function write_results_hdf5(df::DataFrame, path::String, config::SweepConfig)

@@ -60,8 +60,8 @@ Pkg.instantiate()
 |---------|---------|
 | SpecialFunctions.jl | Spherical Bessel functions |
 | FFTW.jl | FFT-accelerated translation |
-| HDF5.jl | Output storage for large parameter sweeps |
-| CSV.jl + DataFrames.jl | Alternative tabular output format |
+| HDF5.jl | Incremental output storage for large parameter sweeps |
+| CSV.jl + DataFrames.jl | Reading aggregate catalog (input side) |
 | LinearAlgebra (stdlib) | Matrix operations |
 | Printf (stdlib) | Formatted output |
 
@@ -189,9 +189,11 @@ config = SweepConfig(
     truncation_order = nothing,       # nothing = automatic, or Int to override
 )
 
-# Run sweep and save results
-df = run_parameter_sweep(aggregates, config; output_file="results.csv")
+# Run sweep — results written incrementally to HDF5 (safe to interrupt and resume)
+run_parameter_sweep(aggregates, config; output_h5="results.h5")
 ```
+
+`run_parameter_sweep` returns `nothing`; all results are written directly to the HDF5 file. If the file already exists, completed jobs are detected automatically and skipped (resume support).
 
 **From .ptsa text files** (alternative):
 
@@ -201,12 +203,12 @@ julia -t 4 --project=. scripts/run_sweep_small.jl [--fft] [--truncation-order N]
 
 ```julia
 aggregates = [read_aggregate_file(f) for f in readdir("aggregates/", join=true)]
-df = run_parameter_sweep(aggregates, config; output_file="results.csv")
+run_parameter_sweep(aggregates, config; output_h5="results.h5")
 ```
 
 ### Output data format
 
-The `DataFrame` (and corresponding CSV/HDF5 file) contains one row per (aggregate, medium_condition, refractive_index) combination, with 52 columns:
+Results are stored in HDF5 format. Each column is a 1-D dataset of length equal to the number of completed jobs. There are 51 columns per row (one row = one aggregate × medium_condition × refractive_index combination):
 
 #### Aggregate metadata and material
 
@@ -253,7 +255,7 @@ Same structure as forward with `_bwd` suffix (16 columns total).
 | `Q_ext` | Float64 | dimensionless | Extinction efficiency (unpolarized incidence) |
 | `Q_abs` | Float64 | dimensionless | Absorption efficiency |
 | `Q_sca` | Float64 | dimensionless | Scattering efficiency (= Q_ext − Q_abs) |
-| `converged` | Bool | — | Whether CBICG solver converged |
+| `converged` | Int8 | — | Whether CBICG solver converged (1 = yes, 0 = no) |
 | `n_iterations` | Int | — | Number of CBICG iterations used |
 | `truncation_order` | Int | — | Maximum VSWF truncation order used |
 
@@ -262,19 +264,6 @@ Same structure as forward with `_bwd` suffix (16 columns total).
 **Physical cross sections** are not stored in the output, but can be computed as: $C = Q \times \pi \times R_\mathrm{ve}^2$ (same length unit squared).
 
 ### Reading output files
-
-**CSV:**
-
-```julia
-using CSV, DataFrames
-df = CSV.read("results.csv", DataFrame)
-```
-
-or with the provided script:
-
-```bash
-julia --project=. scripts/read_results_csv.jl results.csv
-```
 
 **HDF5:**
 

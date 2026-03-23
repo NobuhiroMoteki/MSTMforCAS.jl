@@ -1,16 +1,17 @@
 """
 Parameter sweep using HDF5 + CSV catalog from aggregate_generator_PTSA.
+Results are written incrementally to HDF5 — safe to interrupt and resume.
 
 Run with:
   julia --project=. scripts/run_sweep_h5.jl [--fft] [--truncation-order N]
-  julia -t 4 --project=. scripts/run_sweep_h5.jl [--fft]
+  julia -t auto --project=. scripts/run_sweep_h5.jl [--fft]
 
 Options:
   --fft                : use FFT-accelerated translation (faster for N > ~100 spheres)
   --truncation-order N : override automatic VSWF truncation order
 """
 
-using MSTMforCAS, Printf, DataFrames
+using MSTMforCAS, Printf
 
 use_fft = "--fft" in ARGS
 truncation_order = let to = nothing
@@ -25,8 +26,8 @@ end
 # ─── Aggregate data files ────────────────────────────────────────────────────
 # HDF5 + CSV catalog produced by aggregate_generator_PTSA
 agg_dir  = joinpath(@__DIR__, "..", "data", "aggregates")
-h5_file  = joinpath(agg_dir, "aggregates_20260316_00.h5")
-csv_file = joinpath(agg_dir, "catalog_20260316_00.csv")
+h5_file  = joinpath(agg_dir, "aggregates_20260323_00.h5")
+csv_file = joinpath(agg_dir, "catalog_20260323_00.csv")
 
 # Extract YYYYMMDD_xx identifier from aggregate filename
 agg_id = let m = match(r"(\d{8}_\d{2})", basename(h5_file))
@@ -39,14 +40,14 @@ println("  CSV: $csv_file")
 println("  Aggregate ID: $agg_id")
 
 # Read all aggregates (or filter with Df_range, Np_range, agg_num_range)
-aggregates = read_aggregate_catalog(h5_file, csv_file)
+aggregates = read_aggregate_catalog(h5_file, csv_file; agg_num_range=(0, 5))
 
 println("  Loaded $(length(aggregates)) aggregates")
 println()
 
 # ─── Print summary of aggregate parameters ───────────────────────────────────
-Df_vals = sort(unique(a.Df for a in aggregates))
-Np_vals = sort(unique(a.n_monomers for a in aggregates))
+Df_vals  = sort(unique(a.Df for a in aggregates))
+Np_vals  = sort(unique(a.n_monomers for a in aggregates))
 agg_nums = sort(unique(a.agg_num for a in aggregates))
 println("  Df values:  $Df_vals")
 println("  Np values:  $Np_vals")
@@ -55,9 +56,9 @@ println()
 
 # ─── Configure sweep ─────────────────────────────────────────────────────────
 config = SweepConfig(
-    medium_conditions = [(0.6328, 1.0), (0.6328, 1.33)],  # (wavelength [μm], n_medium)
-    m_real_range = (1.5, 1.6, 2),    # (min, max, n_grid)
-    m_imag_range = (0.0, 0.0123, 2), # (min, max, n_grid)
+    medium_conditions = [(0.453, 1.0), (0.638, 1.0), (0.834, 1.0)],  # (wavelength [μm], n_medium)
+    m_real_range = (1.4, 2.6, 49),    # (min, max, n_grid)
+    m_imag_range = (0.0, 1.6, 65),    # (min, max, n_grid)
     max_iterations     = 200,
     convergence_epsilon = 1e-6,
     use_fft            = use_fft,
@@ -67,7 +68,7 @@ config = SweepConfig(
 n_mc = length(config.medium_conditions)
 mr_min, mr_max, mr_n = config.m_real_range
 mi_min, mi_max, mi_n = config.m_imag_range
-n_ri = mr_n * mi_n
+n_ri  = mr_n * mi_n
 n_jobs = length(aggregates) * n_mc * n_ri
 println("Medium conditions ($n_mc): $(config.medium_conditions)")
 println("RI grid: m_real ∈ [$mr_min, $mr_max] (n=$mr_n) × m_imag ∈ [$mi_min, $mi_max] (n=$mi_n) → $n_ri RI values")
@@ -75,36 +76,22 @@ println("Total jobs: $n_jobs ($(length(aggregates)) aggregates × $n_mc media ×
 println("Threads: $(Threads.nthreads()), use_fft: $use_fft, truncation_order: $(truncation_order === nothing ? "auto" : truncation_order)")
 println()
 
-# ─── Output paths ────────────────────────────────────────────────────────────
+# ─── Output path ─────────────────────────────────────────────────────────────
 results_dir = joinpath(@__DIR__, "..", "data", "results")
 mkpath(results_dir)
-output_csv = joinpath(results_dir, "results_fullsweep_agg$(agg_id).csv")
-output_h5  = joinpath(results_dir, "results_fullsweep_agg$(agg_id).h5")
+output_h5 = joinpath(results_dir, "results_fullsweep_agg$(agg_id).h5")
+
+println("Output: $output_h5")
+if isfile(output_h5)
+    println("  (existing file found — will resume from where left off)")
+end
+println()
 
 # ─── Run sweep ───────────────────────────────────────────────────────────────
 println("Running sweep...")
 t0 = time()
-df = run_parameter_sweep(aggregates, config; output_file=output_csv)
+run_parameter_sweep(aggregates, config; output_h5=output_h5)
 dt = time() - t0
 
-# Also write HDF5
-write_results_hdf5(df, output_h5, config)
-
 println("Done in $(round(dt, digits=1)) s")
-println()
-println("Results saved to:")
-println("  $output_csv")
-println("  $output_h5")
-println("$(nrow(df)) rows × $(ncol(df)) columns")
-println()
-
-# ─── Summary ─────────────────────────────────────────────────────────────────
-println("Summary (first 10 rows):")
-for row in eachrow(first(df, 10))
-    @printf("  wl=%.4f n_med=%.4f  Df=%.2f Np=%3d agg=%d  m=(%.3f+%.4fi)  Q_ext=%.4e  Q_sca=%.4e  conv=%s  iter=%d  norder=%d\n",
-        row.wavelength, row.medium_refindex,
-        row.Df, row.n_monomers, row.agg_num,
-        row.m_real, row.m_imag,
-        row.Q_ext, row.Q_sca,
-        row.converged ? "Y" : "N", row.n_iterations, row.truncation_order)
-end
+println("Results saved to: $output_h5")
