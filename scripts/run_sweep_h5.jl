@@ -39,8 +39,9 @@ println("  H5:  $h5_file")
 println("  CSV: $csv_file")
 println("  Aggregate ID: $agg_id")
 
-# Read all aggregates (or filter with Df_range, Np_range, agg_num_range)
-aggregates = read_aggregate_catalog(h5_file, csv_file; agg_num_range=(0, 5))
+# agg_num range for this machine (0-2 or 3-5)
+agg_num_lo, agg_num_hi = 0, 2
+aggregates = read_aggregate_catalog(h5_file, csv_file; agg_num_range=(agg_num_lo, agg_num_hi))
 
 println("  Loaded $(length(aggregates)) aggregates")
 println()
@@ -57,8 +58,8 @@ println()
 # ─── Configure sweep ─────────────────────────────────────────────────────────
 config = SweepConfig(
     medium_conditions = [(0.453, 1.0), (0.638, 1.0), (0.834, 1.0)],  # (wavelength [μm], n_medium)
-    m_real_range = (1.4, 2.6, 49),    # (min, max, n_grid)
-    m_imag_range = (0.0, 1.6, 65),    # (min, max, n_grid)
+    m_real_range = (1.55, 2.35, 17),    # (min, max, n_grid)
+    m_imag_range = (0.15, 1.35, 25),    # (min, max, n_grid)
     max_iterations     = 200,
     convergence_epsilon = 1e-6,
     use_fft            = use_fft,
@@ -79,7 +80,7 @@ println()
 # ─── Output path ─────────────────────────────────────────────────────────────
 results_dir = joinpath(@__DIR__, "..", "data", "results")
 mkpath(results_dir)
-output_h5 = joinpath(results_dir, "results_fullsweep_agg$(agg_id).h5")
+output_h5 = joinpath(results_dir, "results_fullsweep_agg$(agg_id)_num$(agg_num_lo)-$(agg_num_hi).h5")
 
 println("Output: $output_h5")
 if isfile(output_h5)
