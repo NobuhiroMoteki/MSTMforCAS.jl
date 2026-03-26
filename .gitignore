@@ -11,11 +11,11 @@ CLAUDE.md
 # Reference materials (Fortran MSTM source, papers, etc.)
 ref/
 
-# Data — HDF5 too large for git; CSV catalogs are tracked
+# Data — HDF5 too large for git; CSV catalogs in data/aggregates/ are tracked
 data/**/*.h5
 data/**/*.hdf5
-data/results/*.h5
-data/results/*.hdf5
+data/aggregates/ptsa_files/
+data/results/
 
 # OS
 .DS_Store

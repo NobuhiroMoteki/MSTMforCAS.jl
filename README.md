@@ -434,11 +434,13 @@ All timings on a single core (no MPI, no multi-threading). Julia version: 1.11, 
 
 **Memory**: Julia FFT mode uses ~0.5 GB (including ~190 MB for cached near-field translation matrices). For practical CAS parameter sweeps (N ≤ 1000), memory is not a bottleneck.
 
-**Multi-threading**: Parallelization is at the **parameter sweep level**, not within a single aggregate computation. `run_parameter_sweep` distributes the (aggregate × medium_condition × refractive_index) job grid across threads via `Threads.@threads`. Start Julia with `julia -t auto` or `julia -t N`.
+**Multi-threading**: Parallelization is at the **parameter sweep level**, not within a single aggregate computation. Jobs are grouped by (aggregate, medium_condition), and `Threads.@threads :dynamic` distributes groups across threads with work-stealing load balancing. Groups are sorted by descending monomer count so large aggregates start first. Within each group, all refractive index values share the precomputed FFT grid. Start Julia with `julia -t auto` or `julia -t N`.
 
 This task-level parallelism is far more efficient than parallelizing within a single solver call because: (1) each job is fully independent — zero inter-thread communication and synchronization, giving near-linear scaling; (2) intra-solver parallelism (e.g., threading the O(N²) translation loop) would require synchronization at every BiCG iteration, and Amdahl's law limits the practical speedup to 2–5×. For typical CAS parameter sweeps (thousands of jobs across aggregates, medium conditions, and refractive indices), task-level parallelism with C cores gives ~C× speedup as long as the number of jobs exceeds C.
 
-Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section.
+**Progress and crash recovery**: Results are flushed to HDF5 every ~60 seconds with a result snapshot (CAS amplitudes, Q_ext). ETA is estimated using cost-weighted progress (Np² for direct, Np for FFT mode). If the process is interrupted, restarting with the same output file automatically resumes from where it left off.
+
+Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section. HDF5 writes are serialized via a lock.
 
 ## Testing
 
