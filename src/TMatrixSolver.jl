@@ -103,45 +103,81 @@ end
 # ─────────────────────────────────────────────────────────────
 
 """
-    _apply_T!(out, inp, mie_vecs, offsets, half_nblks, nois)
+    _build_mn_to_n(nmax::Int) -> Vector{Int}
+
+Precompute lookup table: mn_to_n[mn] = n for mn = n*(n+1)+m, n=1..nmax, m=-n..n.
+"""
+function _build_mn_to_n(nmax::Int)::Vector{Int}
+    hnb = nmax * (nmax + 2)
+    mn_to_n = Vector{Int}(undef, hnb)
+    for n in 1:nmax
+        for m in -n:n
+            mn = n * (n + 1) + m
+            mn_to_n[mn] = n
+        end
+    end
+    return mn_to_n
+end
+
+"""
+    _precompute_T_values(mie_vecs, nois) -> (t_diag_vecs, t_off_vecs)
+
+Precompute T-matrix diagonal and off-diagonal values per sphere per n:
+  t_diag[n] = -(a_n + b_n) / 2,  t_off[n] = -(a_n - b_n) / 2
+"""
+function _precompute_T_values(
+    mie_vecs::Vector{Tuple{Vector{ComplexF64}, Vector{ComplexF64}}},
+    nois::Vector{Int}
+)
+    N = length(nois)
+    t_diag_vecs = Vector{Vector{ComplexF64}}(undef, N)
+    t_off_vecs  = Vector{Vector{ComplexF64}}(undef, N)
+    for i in 1:N
+        a_v, b_v = mie_vecs[i]
+        noi = nois[i]
+        td = Vector{ComplexF64}(undef, noi)
+        to = Vector{ComplexF64}(undef, noi)
+        for n in 1:noi
+            td[n] = -(a_v[n] + b_v[n]) / 2
+            to[n] = -(a_v[n] - b_v[n]) / 2
+        end
+        t_diag_vecs[i] = td
+        t_off_vecs[i]  = to
+    end
+    return (t_diag_vecs, t_off_vecs)
+end
+
+"""
+    _apply_T!(out, inp, t_diag_vecs, t_off_vecs, mn_to_n, offsets, half_nblks)
 
 Apply the block-diagonal T-matrix to inp, storing result in out.
 
-In the lr_tran basis, the T-matrix per sphere i and multipole order n is:
-  T_n = [[-(aₙ+bₙ)/2, -(aₙ-bₙ)/2], [-(aₙ-bₙ)/2, -(aₙ+bₙ)/2]]
-
-This couples the p=1 and p=2 VSWF blocks (Fortran: multmiecoeffmult with an1(p,q,n)).
-
-- `mie_vecs[i]` = (a_vec, b_vec) Mie coefficients for sphere i
-- `offsets[i]` = start index (0-based) of sphere i in the flat vector
-- `half_nblks[i]` = noi*(noi+2) for sphere i
-- `nois[i]` = Mie order for sphere i
+Uses precomputed T-matrix values and mn→n lookup table for speed.
 """
 function _apply_T!(
     out::Vector{ComplexF64},
     inp::Vector{ComplexF64},
-    mie_vecs::Vector{Tuple{Vector{ComplexF64}, Vector{ComplexF64}}},
+    t_diag_vecs::Vector{Vector{ComplexF64}},
+    t_off_vecs::Vector{Vector{ComplexF64}},
+    mn_to_n::Vector{Int},
     offsets::Vector{Int},
-    half_nblks::Vector{Int},
-    nois::Vector{Int}
+    half_nblks::Vector{Int}
 )
-    N = length(nois)
+    N = length(offsets)
     @inbounds for i in 1:N
-        off  = offsets[i]
-        hnb  = half_nblks[i]
-        noi  = nois[i]
-        a_v, b_v = mie_vecs[i]
+        off = offsets[i]
+        hnb = half_nblks[i]
+        td_v = t_diag_vecs[i]
+        to_v = t_off_vecs[i]
 
         for mn in 1:hnb
-            n = Int(floor(sqrt(Float64(mn))))
-            t_diag = -(a_v[n] + b_v[n]) / 2
-            t_off  = -(a_v[n] - b_v[n]) / 2
+            n = mn_to_n[mn]
+            td = td_v[n]
+            to = to_v[n]
             inp_p1 = inp[off + mn]
             inp_p2 = inp[off + hnb + mn]
-            # p=1 block: index off + mn
-            out[off + mn]       = t_diag * inp_p1 + t_off  * inp_p2
-            # p=2 block: index off + hnb + mn
-            out[off + hnb + mn] = t_off  * inp_p1 + t_diag * inp_p2
+            out[off + mn]       = td * inp_p1 + to * inp_p2
+            out[off + hnb + mn] = to * inp_p1 + td * inp_p2
         end
     end
 end
@@ -333,7 +369,7 @@ end
         normalize_error::Bool = true,
         use_fft::Bool = false,
         truncation_order::Union{Int,Nothing} = nothing
-    ) -> (amn, converged, n_iter, noi_max)
+    ) -> (amn, converged, n_iter, noi_max, nois, offsets, half_nblks, rhs)
 
 Solve the multi-sphere T-matrix interaction equation using CBICG.
 
@@ -346,11 +382,13 @@ Solve the multi-sphere T-matrix interaction equation using CBICG.
 
 # Returns
 - `amn`: Matrix{ComplexF64} of size (neqns, 2), solution coefficients for polarizations q=1,2.
-  Row ordering: for sphere i, p=1 block (mn=1..half_nblk_i) then p=2 block (mn=1..half_nblk_i),
-  concatenated over all spheres in order i=1..N.
 - `converged`: true if both polarizations converged within tolerance
 - `n_iter`: maximum iteration count used across both polarizations
 - `noi_max`: maximum VSWF truncation order actually used
+- `nois`: per-sphere Mie truncation orders
+- `offsets`: per-sphere 0-based offsets in the flat vector
+- `half_nblks`: per-sphere half-block sizes noi*(noi+2)
+- `rhs`: incident field coefficients (neqns, 2) before T-matrix application
 """
 function solve_tmatrix(
     positions::Matrix{Float64},
@@ -361,7 +399,7 @@ function solve_tmatrix(
     normalize_error::Bool = true,
     use_fft::Bool = false,
     truncation_order::Union{Int,Nothing} = nothing
-)::Tuple{Matrix{ComplexF64}, Bool, Int, Int}
+)::Tuple{Matrix{ComplexF64}, Bool, Int, Int, Vector{Int}, Vector{Int}, Vector{Int}, Matrix{ComplexF64}}
 
     N = length(radii)
     @assert size(positions, 1) == 3
@@ -385,11 +423,13 @@ function solve_tmatrix(
     end
     neqns = offsets[N] + nblks[N]
 
-    # ── Step 2: Mie coefficients ─────────────────────────────────────────────
+    # ── Step 2: Mie coefficients + precomputed T-matrix values ──────────────
     mie_vecs = Vector{Tuple{Vector{ComplexF64}, Vector{ComplexF64}}}(undef, N)
     for i in 1:N
         mie_vecs[i] = compute_mie_coefficients(radii[i], m_rel)
     end
+    mn_to_n = _build_mn_to_n(maximum(nois))
+    t_diag_vecs, t_off_vecs = _precompute_T_values(mie_vecs, nois)
 
     # ── Step 3: Incident plane wave coefficients ─────────────────────────────
     # Build global RHS vector for each incident polarization q=1,2.
@@ -460,7 +500,7 @@ function solve_tmatrix(
         fill!(tmp_A, zero(ComplexF64))
         _apply_A_unified!(tmp_A, inp)
         fill!(tmp_T, zero(ComplexF64))
-        _apply_T!(tmp_T, tmp_A, mie_vecs, offsets, half_nblks, nois)
+        _apply_T!(tmp_T, tmp_A, t_diag_vecs, t_off_vecs, mn_to_n, offsets, half_nblks)
         @. out = inp - tmp_T
     end
 
@@ -480,7 +520,7 @@ function solve_tmatrix(
         # Step 1-2: T * conj(inp)
         @. conj_inp_buf = conj(inp)
         fill!(tmp_cT, zero(ComplexF64))
-        _apply_T!(tmp_cT, conj_inp_buf, mie_vecs, offsets, half_nblks, nois)
+        _apply_T!(tmp_cT, conj_inp_buf, t_diag_vecs, t_off_vecs, mn_to_n, offsets, half_nblks)
         # Step 3: apply S in-place to tmp_cT
         for i in 1:N
             _apply_S!(tmp_cT, offsets[i], half_nblks[i], nois[i])
@@ -501,7 +541,7 @@ function solve_tmatrix(
     for q in 1:2
         tmp_rhs_q = rhs[:, q]
         tmp_Trhs_q = zeros(ComplexF64, neqns)
-        _apply_T!(tmp_Trhs_q, tmp_rhs_q, mie_vecs, offsets, half_nblks, nois)
+        _apply_T!(tmp_Trhs_q, tmp_rhs_q, t_diag_vecs, t_off_vecs, mn_to_n, offsets, half_nblks)
         T_rhs[:, q] .= tmp_Trhs_q
     end
 
@@ -528,5 +568,5 @@ function solve_tmatrix(
         n_iter_max      = max(n_iter_max, iters)
     end
 
-    return (amn, converged_both, n_iter_max, maximum(nois))
+    return (amn, converged_both, n_iter_max, maximum(nois), nois, offsets, half_nblks, rhs)
 end

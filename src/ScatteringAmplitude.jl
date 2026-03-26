@@ -248,6 +248,12 @@ function _merge_to_origin!(
 )
     N = length(nois)
 
+    # Pre-allocate translation work buffers (reused per sphere)
+    max_hnb_i = maximum(ntrani[k] * (ntrani[k] + 2) for k in 1:N)
+    trans_p1 = zeros(ComplexF64, max_hnb_i)
+    trans_p2 = zeros(ComplexF64, max_hnb_i)
+    r_trans  = Vector{Float64}(undef, 3)
+
     for i in 1:N
         off  = offsets[i]
         hnb  = half_nblks[i]
@@ -259,29 +265,26 @@ function _merge_to_origin!(
         amn_p1 = @view amn[off+1:off+hnb, :]          # (hnb, 2) p=1 block
         amn_p2 = @view amn[off+hnb+1:off+2hnb, :]     # (hnb, 2) p=2 block
 
-        r_trans = r0 .- positions[:, i]   # translation vector: sphere i → origin
-        dist = sqrt(sum(abs2, r_trans))
+        r_trans[1] = r0[1] - positions[1, i]
+        r_trans[2] = r0[2] - positions[2, i]
+        r_trans[3] = r0[3] - positions[3, i]
+        dist = sqrt(r_trans[1]^2 + r_trans[2]^2 + r_trans[3]^2)
 
         if dist < 1e-10
             # Zero translation: accumulate directly (pad with zeros if noi < ntri)
             n_copy = min(hnb, hnb_i)
-            for q in 1:2
+            @inbounds for q in 1:2
                 for mn in 1:n_copy
                     amn0_mode1[mn, q] += amn_p1[mn, q] + amn_p2[mn, q]
                     amn0_mode2[mn, q] += amn_p1[mn, q] - amn_p2[mn, q]
                 end
             end
         else
-            # Translate each p-block separately (H is block-diagonal in p).
-            # Output order capped at ntri (not full nodrt) to avoid Hankel blowup
-            # at short distances (mirrors Fortran ntrani = min(nodrt, translation_order)).
-            # use_regular=true: j_n (regular Bessel), NOT Hankel — mirrors Fortran vswf_type=1
             H = compute_translation_matrix(r_trans, ComplexF64(1.0), noi, ntri; use_regular=true)
-            # H has size (hnb_i, hnb, 2)
 
-            for q in 1:2
-                trans_p1 = zeros(ComplexF64, hnb_i)
-                trans_p2 = zeros(ComplexF64, hnb_i)
+            @inbounds for q in 1:2
+                fill!(view(trans_p1, 1:hnb_i), zero(ComplexF64))
+                fill!(view(trans_p2, 1:hnb_i), zero(ComplexF64))
                 for kl in 1:hnb_i
                     s1 = zero(ComplexF64)
                     s2 = zero(ComplexF64)
@@ -292,7 +295,6 @@ function _merge_to_origin!(
                     trans_p1[kl] = s1
                     trans_p2[kl] = s2
                 end
-                # Mode transform and accumulate into the first hnb_i rows
                 for mn in 1:hnb_i
                     amn0_mode1[mn, q] += trans_p1[mn] + trans_p2[mn]
                     amn0_mode2[mn, q] += trans_p1[mn] - trans_p2[mn]
@@ -328,7 +330,7 @@ function _amplitude_from_mode_coefs(
     sa3 = zero(ComplexF64)
     sa4 = zero(ComplexF64)
 
-    for n in 1:nodrt
+    @inbounds for n in 1:nodrt
         fnm   = sqrt((2n + 1) / 2.0) / 4.0
         cin   = (-im)^n                # (-i)^n
 
@@ -423,37 +425,10 @@ function compute_scattering(
     N = length(radii)
 
     # ── Solve T-matrix interaction equation ──────────────────────────────────
-    # Returns: amn (neqns, 2) lr-tran flat coefficients, rhs (neqns, 2) incident
-    amn, converged, n_iter, noi_max = solve_tmatrix(
+    amn, converged, n_iter, noi_max, nois, offsets, half_nblks, rhs = solve_tmatrix(
         positions, radii, m_rel; tol=tol, max_iter=max_iter, use_fft=use_fft,
         truncation_order=truncation_order
     )
-
-    # We also need the incident RHS — recompute it from the same code path
-    # (solve_tmatrix doesn't return rhs, so reproduce it here)
-    # Use the same truncation_order logic as solve_tmatrix
-    nois = [let noi_auto = _mie_order(r, m_rel)
-                truncation_order !== nothing ? max(truncation_order, noi_auto) : noi_auto
-            end for r in radii]
-    half_nblks = [noi * (noi + 2) for noi in nois]
-    nblks      = [2 * h for h in half_nblks]
-    offsets    = Vector{Int}(undef, N)
-    offsets[1] = 0
-    for i in 2:N; offsets[i] = offsets[i-1] + nblks[i-1]; end
-    neqns = offsets[N] + nblks[N]
-
-    rhs = zeros(ComplexF64, neqns, 2)
-    for i in 1:N
-        noi  = nois[i]; hnb = half_nblks[i]; off = offsets[i]
-        z_i  = positions[3, i]; phase = exp(im * z_i)
-        p0_i = _genplanewavecoef_z0(noi)
-        for q in 1:2, p in 1:2
-            p_off = (p - 1) * hnb
-            for mn in 1:hnb
-                rhs[off + p_off + mn, q] += phase * p0_i[mn, p, q]
-            end
-        end
-    end
 
     # ── Q_ext (optical theorem) ───────────────────────────────────────────────
     x_eff = _x_eff(radii)

@@ -196,7 +196,7 @@ end
 
 function _init_tran_coef(nodrmax::Int, fnr, bcof)::Array{Float64, 3}
     ntot = nodrmax * (nodrmax + 2)
-    tc   = zeros(Float64, ntot, ntot, 2*nodrmax + 1)
+    tc   = zeros(Float64, 2*nodrmax + 1, ntot, ntot)  # (w+1, idx1, idx2) — stride-1 in w
 
     for l in 1:nodrmax
         for n in 1:nodrmax
@@ -214,9 +214,9 @@ function _init_tran_coef(nodrmax::Int, fnr, bcof)::Array{Float64, 3}
                     for w in wmin:wmax
                         a = (1im)^mod(w, 4) * c * m1m * vc1[w+1] * vc2[w+1]
                         if (wmax - w) % 2 == 0
-                            tc[mn, kl, w+1] = real(a)
+                            tc[w+1, mn, kl] = real(a)
                         else
-                            tc[mn, kl, w+1] = imag(a)
+                            tc[w+1, mn, kl] = imag(a)
                         end
                     end
                 end
@@ -441,7 +441,7 @@ function compute_translation_matrix(
                     a = zero(ComplexF64)   # even-parity sum
                     b = zero(ComplexF64)   # odd-parity sum
                     for w in wmax:-1:wmin
-                        ywt = hn[w+1] * ymn[v+wmax_global+1, w+1] * tc[kl, mn, w+1]
+                        ywt = hn[w+1] * ymn[v+wmax_global+1, w+1] * tc[w+1, kl, mn]
                         if (wmax - w) % 2 == 0
                             a += ywt
                         else
@@ -566,11 +566,11 @@ function apply_translation_mvp!(
                     b    = zero(ComplexF64)
                     # Even terms: (wmax_local - w) even → w has same parity as wmax_local
                     for w in wmax_local:-2:wmin
-                        a += fywt_buf[vi, w+1] * tc[kl, mn, w+1]
+                        a += fywt_buf[vi, w+1] * tc[w+1, kl, mn]
                     end
                     # Odd terms: (wmax_local - w) odd → w has opposite parity
                     for w in (wmax_local-1):-2:wmin
-                        b += fywt_buf[vi, w+1] * tc[kl, mn, w+1]
+                        b += fywt_buf[vi, w+1] * tc[w+1, kl, mn]
                     end
                     ep = ephim_buf[vi]
                     h1 = ep * (a + im*b)
