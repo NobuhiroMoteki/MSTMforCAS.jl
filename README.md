@@ -420,14 +420,14 @@ All timings on a single core (no MPI, no multi-threading). Julia version: 1.11, 
 
 | | Julia direct | Julia FFT | Fortran direct (1 proc) | Fortran FFT (1 proc) |
 |---|---|---|---|---|
-| Solver time | 413 s | 10.5 s | 96.4 s | 3.3 s |
-| Speedup vs Julia direct | 1× | **40×** | — | — |
+| Solver time | 301 s | 7.2 s | 96.4 s | 3.3 s |
+| Speedup vs Julia direct | 1× | **42×** | — | — |
 | Iterations | 18 | 18 | 18 | 18 |
-| Peak memory | ~2 GB | ~0.3 GB | ~0.5 GB | ~0.1 GB |
+| Peak memory | ~2 GB | ~0.5 GB | ~0.5 GB | ~0.1 GB |
 
-**Julia vs Fortran speed**: The Julia direct solver is ~4× slower than single-process Fortran for this test case, primarily because the Fortran code uses optimized in-place matrix operations and pre-allocated work arrays at a lower level. The Julia FFT solver is ~3× slower than the Fortran FFT solver. These ratios are expected to improve with further Julia-side optimization (e.g., LoopVectorization, precomputed rotation matrices).
+**Julia vs Fortran speed**: The Julia direct solver is ~3× slower than single-process Fortran for this test case. The Julia FFT solver is ~2× slower than the Fortran FFT solver. Key optimizations applied: stride-1 translation coefficient layout, batched FFTW plans (6× on FFT convolution), precomputed near-field translation matrices, and precomputed T-matrix lookup tables.
 
-**Memory**: Julia's higher memory usage is due to garbage collector overhead and less aggressive in-place reuse compared to Fortran. For practical CAS parameter sweeps (N ≤ 1000), memory is not a bottleneck.
+**Memory**: Julia FFT mode uses ~0.5 GB (including ~190 MB for cached near-field translation matrices). For practical CAS parameter sweeps (N ≤ 1000), memory is not a bottleneck.
 
 **Multi-threading**: Parallelization is at the **parameter sweep level**, not within a single aggregate computation. `run_parameter_sweep` distributes the (aggregate × medium_condition × refractive_index) job grid across threads via `Threads.@threads`. Start Julia with `julia -t auto` or `julia -t N`.
 
