@@ -70,6 +70,10 @@ struct FFTGridData
     # Cached node-to-sphere reverse translation matrices
     # node_sphere_H[i] = H[hnb_sphere_i, nblk_node, 2]
     node_sphere_H ::Vector{Array{ComplexF64, 3}}
+    # Cached near-field Hankel translation matrices
+    # nearfield_H[i][k] = H matrix for the k-th neighbor pair of sphere i
+    # H has shape (hnb_i, hnb_j, 2) where j = neighbor_pairs[i][k]
+    nearfield_H ::Vector{Vector{Array{ComplexF64, 3}}}
     # FFTW plans — batched along first 3 dims of (2nx, 2ny, 2nz, nblk) array
     fft_plan_batch  ::Any   # pre-planned batched forward FFT (dims 1:3)
     ifft_plan_batch ::Any   # pre-planned batched inverse FFT (dims 1:3)
@@ -352,6 +356,20 @@ function init_fft_grid(
     sphere_to_node_H, node_to_sphere_H = _precompute_sphere_node_translations(
         positions, sphere_node, cell_boundary, d_cell, nois, node_order)
 
+    # Precompute near-field Hankel translation matrices for all neighbor pairs
+    N = size(positions, 2)
+    k_medium = ComplexF64(1.0)
+    nearfield_H = Vector{Vector{Array{ComplexF64, 3}}}(undef, N)
+    for i in 1:N
+        npairs = neighbor_pairs[i]
+        nearfield_H[i] = Vector{Array{ComplexF64, 3}}(undef, length(npairs))
+        for (k, j) in enumerate(npairs)
+            r_ij = Float64[positions[m, i] - positions[m, j] for m in 1:3]
+            nearfield_H[i][k] = compute_translation_matrix(
+                r_ij, k_medium, nois[j], nois[i]; use_regular=false)
+        end
+    end
+
     # Create batched FFTW plans: transform dims 1:3 of a (2nx, 2ny, 2nz, nblk) array
     nx, ny, nz = cell_dim
     plan_buf_batch = zeros(ComplexF64, 2nx, 2ny, 2nz, nblk_node)
@@ -363,6 +381,7 @@ function init_fft_grid(
         sphere_node, neighbor_offsets, neighbor_pairs,
         tran_p1, tran_p2,
         sphere_to_node_H, node_to_sphere_H,
+        nearfield_H,
         fft_plan_batch, ifft_plan_batch
     )
 end
@@ -506,49 +525,47 @@ function _fft_node_to_node!(
 end
 
 """
-    _nearfield_direct!(out, inp, positions, fft_data, offsets, half_nblks, nois)
+    _nearfield_direct!(out, inp, fft_data, offsets, half_nblks)
 
 Direct sphere-to-sphere Hankel translation for neighbor pairs excluded from FFT.
+Uses precomputed translation matrices from `fft_data.nearfield_H` for speed.
 """
 function _nearfield_direct!(
     out::Vector{ComplexF64},
     inp::Vector{ComplexF64},
-    positions::Matrix{Float64},
     fft_data::FFTGridData,
     offsets::Vector{Int},
-    half_nblks::Vector{Int},
-    nois::Vector{Int}
+    half_nblks::Vector{Int}
 )
     N = length(offsets)
-    nodrmax     = maximum(nois)
-    wmax_global = 2 * nodrmax
 
-    # Work buffers
-    ephim_buf = Vector{ComplexF64}(undef, 2*wmax_global + 1)
-    fn_buf    = Vector{ComplexF64}(undef, wmax_global + 1)
-    ymn_buf   = Matrix{Float64}(undef, 2*wmax_global + 1, wmax_global + 1)
-    fywt_buf  = Matrix{ComplexF64}(undef, 2*wmax_global + 1, wmax_global + 1)
-    r_ij      = Vector{Float64}(undef, 3)
-
-    for i in 1:N
+    @inbounds for i in 1:N
         off_i = offsets[i]
         hnb_i = half_nblks[i]
-        noi_i = nois[i]
+        npairs = fft_data.neighbor_pairs[i]
 
-        for j in fft_data.neighbor_pairs[i]
+        for (k, j) in enumerate(npairs)
             off_j = offsets[j]
             hnb_j = half_nblks[j]
-            noi_j = nois[j]
+            H = fft_data.nearfield_H[i][k]  # (hnb_i, hnb_j, 2)
 
-            r_ij[1] = positions[1, i] - positions[1, j]
-            r_ij[2] = positions[2, i] - positions[2, j]
-            r_ij[3] = positions[3, i] - positions[3, j]
+            # p=1 block: out[off_i + kl] += Σ_mn H[kl, mn, 1] * inp[off_j + mn]
+            for kl in 1:hnb_i
+                s = zero(ComplexF64)
+                for mn in 1:hnb_j
+                    s += H[kl, mn, 1] * inp[off_j + mn]
+                end
+                out[off_i + kl] += s
+            end
 
-            apply_translation_mvp!(
-                out, inp, off_i, hnb_i, off_j, hnb_j,
-                r_ij, noi_j, noi_i,
-                ephim_buf, fn_buf, ymn_buf, fywt_buf
-            )
+            # p=2 block: out[off_i + hnb_i + kl] += Σ_mn H[kl, mn, 2] * inp[off_j + hnb_j + mn]
+            for kl in 1:hnb_i
+                s = zero(ComplexF64)
+                for mn in 1:hnb_j
+                    s += H[kl, mn, 2] * inp[off_j + hnb_j + mn]
+                end
+                out[off_i + hnb_i + kl] += s
+            end
         end
     end
 end
@@ -591,6 +608,6 @@ function apply_A_fft!(
     # Step 3: Node → Sphere
     _node_to_sphere!(out, gnode_buf, fft_data, offsets, half_nblks, nois)
 
-    # Step 4: Near-field direct correction
-    _nearfield_direct!(out, inp, positions, fft_data, offsets, half_nblks, nois)
+    # Step 4: Near-field direct correction (using precomputed H matrices)
+    _nearfield_direct!(out, inp, fft_data, offsets, half_nblks)
 end
