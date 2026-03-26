@@ -398,7 +398,8 @@ function solve_tmatrix(
     max_iter::Int = 200,
     normalize_error::Bool = true,
     use_fft::Bool = false,
-    truncation_order::Union{Int,Nothing} = nothing
+    truncation_order::Union{Int,Nothing} = nothing,
+    precomputed_fft::Union{FFTGridData, Nothing} = nothing
 )::Tuple{Matrix{ComplexF64}, Bool, Int, Int, Vector{Int}, Vector{Int}, Vector{Int}, Matrix{ComplexF64}}
 
     N = length(radii)
@@ -466,14 +467,15 @@ function solve_tmatrix(
     tmp_T  = zeros(ComplexF64, neqns)
     tmp_A  = zeros(ComplexF64, neqns)
 
-    # FFT translation setup (if enabled)
+    # FFT translation setup (if enabled) — reuse precomputed_fft if provided
     fft_data = nothing
     anode_buf = Array{ComplexF64}(undef, 0, 0, 0, 0, 0)
     gnode_buf = Array{ComplexF64}(undef, 0, 0, 0, 0, 0)
     fft_aft_batch = Array{ComplexF64}(undef, 0, 0, 0, 0)
     fft_gft_buf = Array{ComplexF64}(undef, 0, 0, 0, 0)
     if use_fft && N >= 2
-        fft_data = init_fft_grid(positions, radii, nois)
+        fft_data = precomputed_fft !== nothing ? precomputed_fft :
+                   init_fft_grid(positions, radii, nois)
         nx, ny, nz = fft_data.cell_dim
         nb = fft_data.nblk_node
         anode_buf = zeros(ComplexF64, nx, ny, nz, nb, 2)

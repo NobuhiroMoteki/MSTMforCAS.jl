@@ -197,12 +197,14 @@ function compute_scattering(
     tol    ::Float64 = 1e-6,
     max_iter::Int    = 200,
     use_fft::Bool    = false,
-    truncation_order::Union{Int,Nothing} = nothing
+    truncation_order::Union{Int,Nothing} = nothing,
+    precomputed_fft::Union{FFTGridData, Nothing} = nothing
 )::ScatteringResult
     positions_x = agg.positions .* k   # dimensionless (size parameters)
     radii_x     = agg.radii     .* k
     return compute_scattering(positions_x, radii_x, m_rel; tol=tol, max_iter=max_iter,
-                              use_fft=use_fft, truncation_order=truncation_order)
+                              use_fft=use_fft, truncation_order=truncation_order,
+                              precomputed_fft=precomputed_fft)
 end
 
 # ─────────────────────────────────────────────────────────────
@@ -265,25 +267,34 @@ function run_parameter_sweep(
     end
 
     # ── Build job grid, excluding completed jobs ─────────────────────────────
-    grid = Tuple{Int,Int,Int}[]
+    # Group jobs by (ai, mci) so that all m_rel values for the same
+    # (aggregate, medium_condition) are processed together, sharing FFT setup.
+    # groups[(ai,mci)] = [mi1, mi2, ...]
+    groups = Dict{Tuple{Int,Int}, Vector{Int}}()
+    n_skipped_count = 0
     for ai in 1:n_agg, mci in 1:n_mc, mi in 1:n_mrel
         wl, n_med = config.medium_conditions[mci]
         m_abs = ri_grid[mi]
         key = (aggregates[ai].source, wl, n_med, real(m_abs), imag(m_abs))
         if key ∉ completed_keys
-            push!(grid, (ai, mci, mi))
+            gk = (ai, mci)
+            if !haskey(groups, gk)
+                groups[gk] = Int[]
+            end
+            push!(groups[gk], mi)
+        else
+            n_skipped_count += 1
         end
     end
-
-    n_jobs    = length(grid)
-    n_skipped = n_jobs_total - n_jobs
+    group_list = collect(pairs(groups))  # Vector of (ai,mci) => [mi...]
+    n_jobs = sum(length(mis) for (_, mis) in group_list; init=0)
 
     if n_jobs == 0
         @info "All $n_jobs_total jobs already completed. Nothing to compute."
         return nothing
     end
-    if n_skipped > 0
-        @info "Resuming: $n_skipped jobs already done, $n_jobs remaining"
+    if n_skipped_count > 0
+        @info "Resuming: $n_skipped_count jobs already done, $n_jobs remaining"
     end
 
     # ── Initialize HDF5 file if needed ──────────────────────────────────────
@@ -292,11 +303,12 @@ function run_parameter_sweep(
     end
 
     # ── Pre-warm global caches (single-threaded, must run before @threads) ──
-    let (ai0, mci0, mi0) = grid[1],
+    let (gk0, mis0) = group_list[1],
+        (ai0, mci0) = gk0,
         agg0  = aggregates[ai0],
         (wl0, n_med0) = config.medium_conditions[mci0],
         k0    = 2π * n_med0 / wl0,
-        m_rel0 = ri_grid[mi0] / n_med0
+        m_rel0 = ri_grid[mis0[1]] / n_med0
         compute_scattering(agg0, m_rel0, k0;
             tol=config.convergence_epsilon, max_iter=config.max_iterations,
             use_fft=config.use_fft, truncation_order=config.truncation_order)
@@ -309,96 +321,108 @@ function run_parameter_sweep(
     flush_every = max(Threads.nthreads() * 2, 100)
     t_sw        = time()
 
-    # ── Parallel sweep ────────────────────────────────────────────────────────
-    Threads.@threads for idx in 1:n_jobs
-        ai, mci, mi = grid[idx]
+    # ── Parallel sweep (grouped by geometry+medium for FFT reuse) ────────────
+    Threads.@threads for gidx in 1:length(group_list)
+        (ai, mci), mi_list = group_list[gidx]
         agg     = aggregates[ai]
         wl, n_med = config.medium_conditions[mci]
         k       = 2π * n_med / wl
-        m_abs   = ri_grid[mi]
-        m_rel   = m_abs / n_med
 
-        r = compute_scattering(agg, m_rel, k;
-            tol=config.convergence_epsilon, max_iter=config.max_iterations,
-            use_fft=config.use_fft, truncation_order=config.truncation_order)
-
-        # MI02 amplitudes: S11=S2/(-ik), S22=S1/(-ik), S12=S3/(ik), S21=S4/(ik)
-        ik = im * k
-        S11_fwd = r.S_forward[2] / (-ik);  S22_fwd = r.S_forward[1] / (-ik)
-        S12_fwd = r.S_forward[3] / (ik);   S21_fwd = r.S_forward[4] / (ik)
-        S11_bwd = r.S_backward[2] / (-ik); S22_bwd = r.S_backward[1] / (-ik)
-        S12_bwd = r.S_backward[3] / (ik);  S21_bwd = r.S_backward[4] / (ik)
-
-        local row = (
-            # Aggregate metadata — source
-            source     = agg.source,
-            # Aggregate metadata — constant parameters
-            mean_rp    = agg.mean_rp,
-            rel_std_rp = agg.rel_std_rp,
-            k_f        = agg.k_f,
-            # Aggregate metadata — sweep parameters
-            Df         = agg.Df,
-            n_monomers = agg.n_monomers,
-            agg_num    = agg.agg_num,
-            # Aggregate metadata — derived quantities
-            R_ve       = agg.R_ve,
-            R_g        = agg.R_g,
-            eps_agg    = agg.eps_agg,
-            # Medium condition
-            wavelength     = wl,
-            medium_refindex = n_med,
-            # Material
-            m_real     = real(m_abs),
-            m_imag     = imag(m_abs),
-            # Forward scattering amplitudes — BH83 (dimensionless)
-            S1_fwd_re = real(r.S_forward[1]),  S1_fwd_im = imag(r.S_forward[1]),
-            S2_fwd_re = real(r.S_forward[2]),  S2_fwd_im = imag(r.S_forward[2]),
-            S3_fwd_re = real(r.S_forward[3]),  S3_fwd_im = imag(r.S_forward[3]),
-            S4_fwd_re = real(r.S_forward[4]),  S4_fwd_im = imag(r.S_forward[4]),
-            # Forward scattering amplitudes — MI02 (dimension of length)
-            S11_fwd_re = real(S11_fwd), S11_fwd_im = imag(S11_fwd),
-            S22_fwd_re = real(S22_fwd), S22_fwd_im = imag(S22_fwd),
-            S12_fwd_re = real(S12_fwd), S12_fwd_im = imag(S12_fwd),
-            S21_fwd_re = real(S21_fwd), S21_fwd_im = imag(S21_fwd),
-            # Backward scattering amplitudes — BH83 (dimensionless)
-            S1_bwd_re = real(r.S_backward[1]), S1_bwd_im = imag(r.S_backward[1]),
-            S2_bwd_re = real(r.S_backward[2]), S2_bwd_im = imag(r.S_backward[2]),
-            S3_bwd_re = real(r.S_backward[3]), S3_bwd_im = imag(r.S_backward[3]),
-            S4_bwd_re = real(r.S_backward[4]), S4_bwd_im = imag(r.S_backward[4]),
-            # Backward scattering amplitudes — MI02 (dimension of length)
-            S11_bwd_re = real(S11_bwd), S11_bwd_im = imag(S11_bwd),
-            S22_bwd_re = real(S22_bwd), S22_bwd_im = imag(S22_bwd),
-            S12_bwd_re = real(S12_bwd), S12_bwd_im = imag(S12_bwd),
-            S21_bwd_re = real(S21_bwd), S21_bwd_im = imag(S21_bwd),
-            # Cross-section efficiencies (unpolarized incidence)
-            Q_ext = r.Q_ext,
-            Q_abs = r.Q_abs,
-            Q_sca = r.Q_sca,
-            # Solver diagnostics
-            converged        = r.converged,
-            n_iterations     = r.n_iterations,
-            truncation_order = r.truncation_order,
-        )
-
-        done = Threads.atomic_add!(n_done, 1) + 1
-        lock(io_lock) do
-            push!(save_buf, row)
-            if length(save_buf) >= flush_every || done == n_jobs
-                elapsed = time() - t_sw
-                rate    = elapsed > 0 ? done / elapsed : 0.0
-                eta_s   = rate > 0 ? (n_jobs - done) / rate : Inf
-                @printf("\r  [elapsed %s | ETA %s]  %d / %d  (%.1f%%)  %.1f jobs/s   ",
-                    _fmt_hms(elapsed), _fmt_hms(eta_s),
-                    done + n_skipped, n_jobs_total,
-                    100.0 * (done + n_skipped) / n_jobs_total,
-                    rate)
-                if output_h5 !== nothing
-                    _h5_append!(output_h5, save_buf)
+        # Precompute FFT grid once per (aggregate, medium_condition) group
+        local fft_cache::Union{FFTGridData, Nothing} = nothing
+        if config.use_fft && agg.n_monomers >= 2 && length(mi_list) > 1
+            positions_x = agg.positions .* k
+            radii_x     = agg.radii     .* k
+            # Use the maximum Mie order across all m_rel in this group
+            local max_noi = 0
+            for mi in mi_list
+                m_rel_tmp = ri_grid[mi] / n_med
+                nois_tmp  = [mie_nmax(radii_x[s], m_rel_tmp) for s in 1:length(radii_x)]
+                noi_tmp   = maximum(nois_tmp)
+                if config.truncation_order !== nothing
+                    noi_tmp = max(noi_tmp, config.truncation_order)
                 end
-                empty!(save_buf)
+                max_noi = max(max_noi, noi_tmp)
             end
+            nois_for_grid = fill(max_noi, length(radii_x))
+            fft_cache = init_fft_grid(positions_x, radii_x, nois_for_grid)
         end
-    end
+
+        for mi in mi_list
+            m_abs   = ri_grid[mi]
+            m_rel   = m_abs / n_med
+
+            r = compute_scattering(agg, m_rel, k;
+                tol=config.convergence_epsilon, max_iter=config.max_iterations,
+                use_fft=config.use_fft, truncation_order=config.truncation_order,
+                precomputed_fft=fft_cache)
+
+            # MI02 amplitudes: S11=S2/(-ik), S22=S1/(-ik), S12=S3/(ik), S21=S4/(ik)
+            ik = im * k
+            S11_fwd = r.S_forward[2] / (-ik);  S22_fwd = r.S_forward[1] / (-ik)
+            S12_fwd = r.S_forward[3] / (ik);   S21_fwd = r.S_forward[4] / (ik)
+            S11_bwd = r.S_backward[2] / (-ik); S22_bwd = r.S_backward[1] / (-ik)
+            S12_bwd = r.S_backward[3] / (ik);  S21_bwd = r.S_backward[4] / (ik)
+
+            local row = (
+                source     = agg.source,
+                mean_rp    = agg.mean_rp,
+                rel_std_rp = agg.rel_std_rp,
+                k_f        = agg.k_f,
+                Df         = agg.Df,
+                n_monomers = agg.n_monomers,
+                agg_num    = agg.agg_num,
+                R_ve       = agg.R_ve,
+                R_g        = agg.R_g,
+                eps_agg    = agg.eps_agg,
+                wavelength     = wl,
+                medium_refindex = n_med,
+                m_real     = real(m_abs),
+                m_imag     = imag(m_abs),
+                S1_fwd_re = real(r.S_forward[1]),  S1_fwd_im = imag(r.S_forward[1]),
+                S2_fwd_re = real(r.S_forward[2]),  S2_fwd_im = imag(r.S_forward[2]),
+                S3_fwd_re = real(r.S_forward[3]),  S3_fwd_im = imag(r.S_forward[3]),
+                S4_fwd_re = real(r.S_forward[4]),  S4_fwd_im = imag(r.S_forward[4]),
+                S11_fwd_re = real(S11_fwd), S11_fwd_im = imag(S11_fwd),
+                S22_fwd_re = real(S22_fwd), S22_fwd_im = imag(S22_fwd),
+                S12_fwd_re = real(S12_fwd), S12_fwd_im = imag(S12_fwd),
+                S21_fwd_re = real(S21_fwd), S21_fwd_im = imag(S21_fwd),
+                S1_bwd_re = real(r.S_backward[1]), S1_bwd_im = imag(r.S_backward[1]),
+                S2_bwd_re = real(r.S_backward[2]), S2_bwd_im = imag(r.S_backward[2]),
+                S3_bwd_re = real(r.S_backward[3]), S3_bwd_im = imag(r.S_backward[3]),
+                S4_bwd_re = real(r.S_backward[4]), S4_bwd_im = imag(r.S_backward[4]),
+                S11_bwd_re = real(S11_bwd), S11_bwd_im = imag(S11_bwd),
+                S22_bwd_re = real(S22_bwd), S22_bwd_im = imag(S22_bwd),
+                S12_bwd_re = real(S12_bwd), S12_bwd_im = imag(S12_bwd),
+                S21_bwd_re = real(S21_bwd), S21_bwd_im = imag(S21_bwd),
+                Q_ext = r.Q_ext,
+                Q_abs = r.Q_abs,
+                Q_sca = r.Q_sca,
+                converged        = r.converged,
+                n_iterations     = r.n_iterations,
+                truncation_order = r.truncation_order,
+            )
+
+            done = Threads.atomic_add!(n_done, 1) + 1
+            lock(io_lock) do
+                push!(save_buf, row)
+                if length(save_buf) >= flush_every || done == n_jobs
+                    elapsed = time() - t_sw
+                    rate    = elapsed > 0 ? done / elapsed : 0.0
+                    eta_s   = rate > 0 ? (n_jobs - done) / rate : Inf
+                    @printf("\r  [elapsed %s | ETA %s]  %d / %d  (%.1f%%)  %.1f jobs/s   ",
+                        _fmt_hms(elapsed), _fmt_hms(eta_s),
+                        done + n_skipped_count, n_jobs_total,
+                        100.0 * (done + n_skipped_count) / n_jobs_total,
+                        rate)
+                    if output_h5 !== nothing
+                        _h5_append!(output_h5, save_buf)
+                    end
+                    empty!(save_buf)
+                end
+            end
+        end  # for mi
+    end  # @threads for gidx
     println()  # end progress line
 
     return nothing

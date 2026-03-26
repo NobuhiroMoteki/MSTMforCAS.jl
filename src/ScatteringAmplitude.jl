@@ -419,7 +419,8 @@ function compute_scattering(
     tol::Float64 = 1e-6,
     max_iter::Int = 200,
     use_fft::Bool = false,
-    truncation_order::Union{Int,Nothing} = nothing
+    truncation_order::Union{Int,Nothing} = nothing,
+    precomputed_fft::Union{FFTGridData, Nothing} = nothing
 )::ScatteringResult
 
     N = length(radii)
@@ -427,7 +428,7 @@ function compute_scattering(
     # ── Solve T-matrix interaction equation ──────────────────────────────────
     amn, converged, n_iter, noi_max, nois, offsets, half_nblks, rhs = solve_tmatrix(
         positions, radii, m_rel; tol=tol, max_iter=max_iter, use_fft=use_fft,
-        truncation_order=truncation_order
+        truncation_order=truncation_order, precomputed_fft=precomputed_fft
     )
 
     # ── Q_ext (optical theorem) ───────────────────────────────────────────────
