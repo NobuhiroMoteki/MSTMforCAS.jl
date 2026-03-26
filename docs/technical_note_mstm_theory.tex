@@ -241,7 +241,7 @@ Mackowski \& Kolokolova (2022) report speed improvements exceeding two orders of
 
 The linear system $\mathbf{L}\,\bm{x} = \bm{b}$ where $\mathbf{L} = \mathbf{I} - \mathbf{T}\,\mathbf{A}$ and $\bm{b} = \mathbf{T}\,\bm{p}_\mathrm{inc}$ is solved by the Complex BiConjugate Gradient (CBICG) method (Mackowski \& Mishchenko 2011, \S 2.3).
 
-\subsection{Algorithm}
+\subsection{Operator definitions}
 
 The CBICG iteration requires both the forward operator $\mathbf{L}\,\bm{v} = \bm{v} - \mathbf{T}\,\mathbf{A}\,\bm{v}$ and the adjoint (conjugate transpose) operator $\mathbf{L}^\dagger\,\bm{v} = \bm{v} - \mathbf{A}^\dagger\,\mathbf{T}^\dagger\,\bm{v}$.
 The forward operator is computed by applying the translation $\mathbf{A}$ (direct or FFT-accelerated), followed by the block-diagonal T-matrix application $\mathbf{T}$.
@@ -253,52 +253,82 @@ Mackowski \& Mishchenko (2011) exploit the S-parity symmetry of the VSWF transla
   \label{eq:adjoint-symmetry}
 \end{equation}
 where $\mathbf{S}$ is the parity operator acting on each sphere's coefficient block as $a_{m,n,p} \mapsto (-1)^m\,a_{-m,n,p}$, and ${}^*$ denotes element-wise complex conjugation.
-This profound mathematical identity fundamentally arises from the spatial inversion symmetry and reciprocity of the electromagnetic translation operator.
-This means that the adjoint translation can be evaluated by: (i) applying $\mathbf{S}$, (ii) performing the same forward translation $\mathbf{A}$, (iii) applying $\mathbf{S}$ again, and (iv) complex-conjugating.
+This identity arises from the spatial inversion symmetry and reciprocity of the electromagnetic translation operator.
+The adjoint translation is evaluated by: (i)~applying $\mathbf{S}$, (ii)~performing the same forward translation $\mathbf{A}$, (iii)~applying $\mathbf{S}$ again, and (iv)~complex-conjugating.
 This reuses the forward translation code path entirely, including the FFT-accelerated version, at no additional implementation cost.
 
 The system is solved independently for two orthogonal incident linear polarisations ($q = 1$ corresponding to $x$-polarisation, and $q = 2$ corresponding to $y$-polarisation).
-The convergence criterion is:
+The default convergence tolerance is $\varepsilon = 10^{-6}$.
+
+\subsection{CBICG algorithm (default solver)}
+
+The CBICG (Complex BiConjugate Gradient) algorithm is summarised in Table~\ref{tab:cbicg}.  Each iteration requires one forward operator application $\mathbf{L}\,\bm{v}$ and one adjoint application $\mathbf{L}^\dagger\,\bm{v}$, totalling 2 translation operator ($\mathbf{A}$) evaluations per iteration.
+
+\begin{table}[htbp]
+\caption{CBICG algorithm (Mackowski \& Mishchenko 2011).}
+\label{tab:cbicg}
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{0.95\textwidth}@{}}
+\toprule
+\textbf{Input:} $\mathbf{L}$, $\bm{b} = \mathbf{T}\,\bm{p}_\mathrm{inc}$, tolerance $\varepsilon$, max iterations $n_\mathrm{max}$. \\
+\textbf{Initialise:} $\bm{x}_0 = \bm{b}$, \; $\bm{r}_0 = \bm{b} - \mathbf{L}\,\bm{x}_0$, \; $\bm{q}_0 = \overline{\bm{r}_0}$, \; $\bm{p}_0 = \bm{r}_0$, \; $\bm{w}_0 = \bm{q}_0$, \; $s_0 = \bm{q}_0^\mathsf{H} \bm{r}_0$. \\[4pt]
+\textbf{For} $n = 0, 1, \ldots, n_\mathrm{max} - 1$: \\[2pt]
+\quad 1. \; $\bm{u} = \mathbf{L}\,\bm{p}_n$ \hfill (1 forward operator application) \\
+\quad 2. \; $\bm{v} = \mathbf{L}^\dagger\,\bm{w}_n$ \hfill (1 adjoint operator application via S-parity) \\
+\quad 3. \; $\alpha_n = s_n \;/\; \bm{w}_n^\mathsf{H} \bm{u}$ \\
+\quad 4. \; $\bm{x}_{n+1} = \bm{x}_n + \alpha_n\,\bm{p}_n$ \\
+\quad 5. \; $\bm{r}_{n+1} = \bm{r}_n - \alpha_n\,\bm{u}$, \quad $\bm{q}_{n+1} = \bm{q}_n - \overline{\alpha}_n\,\bm{v}$ \\
+\quad 6. \; $s_{n+1} = \bm{q}_{n+1}^\mathsf{H} \bm{r}_{n+1}$ \\
+\quad 7. \; If $\mathrm{Re}(\bm{r}_{n+1}^\top \bm{r}_{n+1}) / \|\bm{b}\|^2 < \varepsilon$: \textbf{stop}, return $\bm{x}_{n+1}$. \\
+\quad 8. \; $\beta_n = s_{n+1} / s_n$ \\
+\quad 9. \; $\bm{p}_{n+1} = \bm{r}_{n+1} + \beta_n\,\bm{p}_n$, \quad $\bm{w}_{n+1} = \bm{q}_{n+1} + \overline{\beta}_n\,\bm{w}_n$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Note: the convergence criterion (step~7) uses the \emph{bilinear} (not sesquilinear) inner product $\bm{r}^\top \bm{r} = \sum_i r_i^2$, following the Fortran MSTM implementation.  The shadow residual $\bm{q} = \overline{\bm{r}}$ ensures that $\bm{q}^\mathsf{H}\bm{r} = \sum_i r_i^2$.
+
+\subsection{GMRES algorithm (alternative solver)}
+
+As an alternative to CBICG, a GMRES (Generalized Minimal Residual) solver (Saad \& Schultz 1986) is available via Krylov.jl (\texttt{solver=:gmres}).  GMRES requires only the forward operator $\mathbf{L}\,\bm{v}$ (no adjoint) and minimises the 2-norm of the residual over a Krylov subspace
 \begin{equation}
-  \frac{\mathrm{Re}(\bm{r}^\top \bm{r})}{\|\bm{b}\|^2} < \varepsilon
-  \label{eq:convergence}
-\end{equation}
-where $\bm{r}$ is the bilinear (not sesquilinear) residual and $\varepsilon = 10^{-6}$ is the default tolerance.
-
-\subsection{Alternative solver: GMRES}
-
-As an alternative to CBICG, the code provides a GMRES (Generalized Minimal Residual) solver (Saad \& Schultz 1986) via Krylov.jl, selectable with \texttt{solver=:gmres}.  GMRES requires only the forward operator $\mathbf{L}\,\bm{v}$ (no adjoint) and minimises the 2-norm of the residual over a Krylov subspace.
-
-Given the system $\mathbf{L}\,\bm{x} = \bm{b}$ with initial guess $\bm{x}_0$ and initial residual $\bm{r}_0 = \bm{b} - \mathbf{L}\,\bm{x}_0$, GMRES constructs at iteration $k$ the Krylov subspace
-\begin{equation}
-  \mathcal{K}_k(\mathbf{L}, \bm{r}_0) = \mathrm{span}\{\bm{r}_0,\, \mathbf{L}\,\bm{r}_0,\, \mathbf{L}^2\,\bm{r}_0,\, \ldots,\, \mathbf{L}^{k-1}\,\bm{r}_0\}
+  \mathcal{K}_k(\mathbf{L}, \bm{r}_0) = \mathrm{span}\{\bm{r}_0,\, \mathbf{L}\,\bm{r}_0,\, \mathbf{L}^2\,\bm{r}_0,\, \ldots,\, \mathbf{L}^{k-1}\,\bm{r}_0\}.
   \label{eq:krylov-subspace}
 \end{equation}
-and finds the approximate solution $\bm{x}_k = \bm{x}_0 + \bm{z}_k$ where $\bm{z}_k \in \mathcal{K}_k$ minimises the residual norm:
-\begin{equation}
-  \bm{z}_k = \arg\min_{\bm{z} \in \mathcal{K}_k} \|\bm{b} - \mathbf{L}\,(\bm{x}_0 + \bm{z})\|_2.
-  \label{eq:gmres-minimisation}
-\end{equation}
+The algorithm is summarised in Table~\ref{tab:gmres}.
 
-The algorithm proceeds as follows:
-\begin{enumerate}
-  \item \textbf{Arnoldi process.}  Build an orthonormal basis $\{\bm{v}_1, \ldots, \bm{v}_k\}$ of $\mathcal{K}_k$ via modified Gram--Schmidt.  At each step $j$, one matrix-vector product $\bm{w} = \mathbf{L}\,\bm{v}_j$ is computed, followed by orthogonalisation against $\bm{v}_1, \ldots, \bm{v}_j$.  This produces the upper Hessenberg matrix $\bar{\mathbf{H}}_k \in \mathbb{C}^{(k+1) \times k}$ such that $\mathbf{L}\,\mathbf{V}_k = \mathbf{V}_{k+1}\,\bar{\mathbf{H}}_k$.
+\begin{table}[htbp]
+\caption{GMRES algorithm (Saad \& Schultz 1986).}
+\label{tab:gmres}
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{0.95\textwidth}@{}}
+\toprule
+\textbf{Input:} $\mathbf{L}$, $\bm{b}$, tolerance $\varepsilon$, restart parameter $m$, max iterations $n_\mathrm{max}$. \\
+\textbf{Initialise:} $\bm{x}_0 = \bm{b}$, \; $\bm{r}_0 = \bm{b} - \mathbf{L}\,\bm{x}_0$, \; $\beta = \|\bm{r}_0\|_2$, \; $\bm{v}_1 = \bm{r}_0 / \beta$. \\[4pt]
+\textbf{For} $j = 1, 2, \ldots, \min(m, n_\mathrm{max})$: \\[2pt]
+\quad 1. \; $\bm{w} = \mathbf{L}\,\bm{v}_j$ \hfill (1 forward operator application) \\
+\quad 2. \; \textbf{For} $i = 1, \ldots, j$: \; $h_{ij} = \bm{v}_i^\mathsf{H}\,\bm{w}$, \; $\bm{w} \leftarrow \bm{w} - h_{ij}\,\bm{v}_i$ \hfill (modified Gram--Schmidt) \\
+\quad 3. \; $h_{j+1,j} = \|\bm{w}\|_2$, \; $\bm{v}_{j+1} = \bm{w} / h_{j+1,j}$ \\
+\quad 4. \; Solve $\bm{y}_j = \arg\min_{\bm{y}} \|\beta\,\bm{e}_1 - \bar{\mathbf{H}}_j\,\bm{y}\|_2$ via Givens rotations \\
+\quad 5. \; If $\|\beta\,\bm{e}_1 - \bar{\mathbf{H}}_j\,\bm{y}_j\|_2 / \|\bm{b}\|_2 < \varepsilon$: \textbf{stop}. \\[4pt]
+\textbf{Solution update:} $\bm{x} = \bm{x}_0 + \mathbf{V}_j\,\bm{y}_j$, where $\mathbf{V}_j = [\bm{v}_1, \ldots, \bm{v}_j]$. \\
+If $j = m$ and not converged: restart with $\bm{x}_0 \leftarrow \bm{x}$. \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-  \item \textbf{Least-squares solve.}  Minimise $\|\beta\,\bm{e}_1 - \bar{\mathbf{H}}_k\,\bm{y}\|_2$ where $\beta = \|\bm{r}_0\|_2$ and $\bm{e}_1$ is the first unit vector.  This small $(k{+}1) \times k$ problem is solved efficiently via Givens rotations.
-
-  \item \textbf{Solution update.}  $\bm{x}_k = \bm{x}_0 + \mathbf{V}_k\,\bm{y}_k$.
-\end{enumerate}
-
-Key properties:
+Key properties of GMRES compared to CBICG:
 \begin{itemize}
-  \item \textbf{1 operator application per iteration} (no adjoint needed), versus 2 for CBICG.
-  \item \textbf{Monotonically decreasing residual}: $\|\bm{r}_k\|_2 \leq \|\bm{r}_{k-1}\|_2$ by construction, unlike BiCG variants which can exhibit erratic convergence.
-  \item \textbf{Memory}: stores $k$ basis vectors of length $n$, i.e., $O(kn)$ total.  For the system sizes in this code ($n \sim 10^4$, $k \sim 30$), this amounts to ${\sim}\SI{14}{\mega\byte}$.
-  \item The implementation uses restarted GMRES($m$) with $m = 30$ (Krylov.jl \texttt{memory} parameter), restarting the Arnoldi process if $k$ exceeds $m$.
+  \item 1 operator application per iteration (no adjoint), versus 2 for CBICG.
+  \item Monotonically decreasing residual: $\|\bm{r}_k\|_2 \leq \|\bm{r}_{k-1}\|_2$ by construction.
+  \item Memory: $O(kn)$ for $k$ Krylov basis vectors of length $n$ (${\sim}\SI{14}{\mega\byte}$ for $k = 30$, $n = 48000$).
+  \item The implementation uses $m = 30$ (Krylov.jl \texttt{memory} parameter).
 \end{itemize}
 
-\textbf{Performance comparison with CBICG for this problem class.}
-GMRES requires approximately twice as many iterations as CBICG to reach the same residual tolerance, because the CBICG adjoint operator (computed via S-parity, \eqref{eq:adjoint-symmetry}) provides additional directional information that accelerates convergence.  The total number of $\mathbf{A}$-operator applications is therefore similar (CBICG: $k$ iterations $\times$ 2; GMRES: $\sim 2k$ iterations $\times$ 1), and the wall-clock performance is comparable.  The default solver remains CBICG, consistent with the Fortran MSTM reference implementation.
+\textbf{Performance comparison.}
+For the MSTM problem class, GMRES requires approximately twice as many iterations as CBICG to reach the same residual tolerance, because the CBICG adjoint operator (via S-parity, \eqref{eq:adjoint-symmetry}) provides additional directional information.  The total number of $\mathbf{A}$-operator applications is therefore similar (CBICG: $k$ iterations $\times$ 2; GMRES: $\sim 2k$ iterations $\times$ 1), and the wall-clock performance is comparable.  The default solver remains CBICG, consistent with the Fortran MSTM reference implementation.
 
 \subsection{Incident plane wave coefficients}
 
@@ -485,8 +515,8 @@ where $S_s^\mathrm{fwd}$ and $S_p^\mathrm{fwd}$ are the forward scattering ampli
   lr\_tran T-matrix & \eqref{eq:tmatrix-lr} & \texttt{build\_tmatrix} & \texttt{TMatrixSolver.jl} \\
   Translation $\mathbf{H}_{ij}$ & \eqref{eq:axial-translation}--\eqref{eq:lr-translation} & \texttt{translate\_coefs} & \texttt{TranslationCoefs.jl} \\
   FFT translation & \eqref{eq:fft-convolution} & \texttt{fft\_translate}, \texttt{setup\_fft\_grid} & \texttt{FFTTranslation.jl} \\
-  CBICG solver & \eqref{eq:global-system}, \eqref{eq:adjoint-symmetry}--\eqref{eq:convergence} & \texttt{\_solve\_bicg} & \texttt{TMatrixSolver.jl} \\
-  GMRES solver (optional) & \eqref{eq:global-system}, \eqref{eq:krylov-subspace}--\eqref{eq:gmres-minimisation} & \texttt{gmres} (Krylov.jl) & \texttt{TMatrixSolver.jl} \\
+  CBICG solver & \eqref{eq:global-system}, \eqref{eq:adjoint-symmetry}, Table~\ref{tab:cbicg} & \texttt{\_solve\_bicg} & \texttt{TMatrixSolver.jl} \\
+  GMRES solver (optional) & \eqref{eq:global-system}, \eqref{eq:krylov-subspace}, Table~\ref{tab:gmres} & \texttt{gmres} (Krylov.jl) & \texttt{TMatrixSolver.jl} \\
   Incident coefficients & \eqref{eq:pinc-q1}--\eqref{eq:pinc-q2} & \texttt{incident\_coefficients} & \texttt{TMatrixSolver.jl} \\
   Common-origin expansion & \eqref{eq:common-origin}--\eqref{eq:mode-transform} & \texttt{translate\_to\_common\_origin} & \texttt{ScatteringAmplitude.jl} \\
   BH83 amplitudes $S_1$--$S_4$ & \eqref{eq:bh83-amplitude}--\eqref{eq:amplitude-sum} & \texttt{compute\_amplitude\_matrix} & \texttt{ScatteringAmplitude.jl} \\
