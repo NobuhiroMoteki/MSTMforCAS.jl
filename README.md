@@ -60,6 +60,7 @@ Pkg.instantiate()
 |---------|---------|
 | SpecialFunctions.jl | Spherical Bessel functions |
 | FFTW.jl | FFT-accelerated translation |
+| Krylov.jl + LinearOperators.jl | GMRES iterative solver (optional, via `solver=:gmres`) |
 | HDF5.jl | Incremental output storage for large parameter sweeps |
 | CSV.jl + DataFrames.jl | Reading aggregate catalog (input side) |
 | LinearAlgebra (stdlib) | Matrix operations |
@@ -78,6 +79,7 @@ All length inputs (positions, radii, wavelength) must be given in **the same phy
 | `m_imag_range` | `Tuple{Float64,Float64,Int}` | (min, max, n_grid) for imaginary part (positive κ = absorption). | `(0.0, 0.1, 2)` |
 | `use_fft` | `Bool` | FFT-accelerated translation (default `false`) | `true` |
 | `truncation_order` | `Union{Int,Nothing}` | Override VSWF truncation order (default `nothing` = auto) | `8` |
+| `solver` | `Symbol` | Iterative solver: `:cbicg` (default) or `:gmres` | `:gmres` |
 
 The sweep covers the full Cartesian product: **aggregates × medium_conditions × m_real × m_imag**.
 
@@ -148,6 +150,9 @@ result = compute_scattering(agg, m_rel, k_medium; use_fft=true)
 
 # Compute with user-specified truncation order
 result = compute_scattering(agg, m_rel, k_medium; truncation_order=8)
+
+# Compute with GMRES solver instead of default CBICG
+result = compute_scattering(agg, m_rel, k_medium; use_fft=true, solver=:gmres)
 
 # Access results
 result.S_forward        # (S₁, S₂, S₃, S₄) BH83, dimensionless, θ=0°

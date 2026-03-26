@@ -212,6 +212,12 @@ The system is solved independently for two orthogonal incident linear polarisati
 
 where $`\mathbf{r}`$ is the bilinear (not sesquilinear) residual and $`\varepsilon = 10^{-6}`$ is the default tolerance.
 
+### Alternative solver: GMRES
+
+As an alternative to CBICG, the code also provides a GMRES (Generalized Minimal Residual) solver via Krylov.jl, selectable with `solver=:gmres`. GMRES requires only the forward operator $`\mathbf{L}\,\mathbf{v}`$ (no adjoint), at the cost of storing a Krylov basis of $`k`$ vectors (where $`k`$ is the iteration count). For the system sizes in this code ($`n \sim 10^4`$), the memory overhead is negligible (~14 MB for $`k = 18`$).
+
+In practice, GMRES requires approximately twice as many iterations as CBICG to reach the same residual tolerance for this problem class, because the CBICG adjoint operator provides additional directional information that accelerates convergence. The total number of $`\mathbf{A}`$-operator applications is therefore similar between the two solvers (CBICG: $`k`$ iterations $`\times`$ 2 applications; GMRES: $`\sim 2k`$ iterations $`\times`$ 1 application), and the wall-clock performance is comparable. The default solver remains CBICG, consistent with the Fortran MSTM reference implementation.
+
 ### Incident plane wave coefficients
 
 For $`z`$-axis incidence ($`\beta = 0`$, $`\alpha = 0`$), only the $`m = \pm 1`$ multipole components are non-zero due to the azimuthal symmetry of a circularly decomposed plane wave.  In the lr_tran basis, the incident field coefficients for sphere $`i`$ are:
@@ -388,7 +394,8 @@ Input: sphere positions r_i, radii a_i, m_sphere, λ₀, n_med
 | lr_tran T-matrix | Eq. (10) | `build_tmatrix` | [TMatrixSolver.jl](../src/TMatrixSolver.jl) |
 | Translation matrix $`\mathbf{H}_{ij}`$ | Eq. (14)–(15) | `translate_coefs`, `gentrancoefconstants` | [TranslationCoefs.jl](../src/TranslationCoefs.jl) |
 | FFT-accelerated translation | Eq. (16) | `fft_translate`, `setup_fft_grid` | [FFTTranslation.jl](../src/FFTTranslation.jl) |
-| CBICG solver | Eq. (13), (17)–(18) | `solve_bicg` | [TMatrixSolver.jl](../src/TMatrixSolver.jl) |
+| CBICG solver | Eq. (13), (17)–(18) | `_solve_bicg` | [TMatrixSolver.jl](../src/TMatrixSolver.jl) |
+| GMRES solver (optional) | Eq. (13) | `gmres` (Krylov.jl) | [TMatrixSolver.jl](../src/TMatrixSolver.jl) |
 | Incident plane wave coefficients | Eq. (19)–(20) | `incident_coefficients` | [TMatrixSolver.jl](../src/TMatrixSolver.jl) |
 | Common-origin re-expansion | Eq. (21)–(22) | `translate_to_common_origin` | [ScatteringAmplitude.jl](../src/ScatteringAmplitude.jl) |
 | BH83 scattering amplitudes $`S_1`$–$`S_4`$ | Eq. (23)–(24) | `compute_amplitude_matrix` | [ScatteringAmplitude.jl](../src/ScatteringAmplitude.jl) |
