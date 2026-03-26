@@ -470,18 +470,16 @@ function solve_tmatrix(
     fft_data = nothing
     anode_buf = Array{ComplexF64}(undef, 0, 0, 0, 0, 0)
     gnode_buf = Array{ComplexF64}(undef, 0, 0, 0, 0, 0)
-    fft_aft_buf = Array{ComplexF64}(undef, 0, 0, 0)
+    fft_aft_batch = Array{ComplexF64}(undef, 0, 0, 0, 0)
     fft_gft_buf = Array{ComplexF64}(undef, 0, 0, 0, 0)
-    fft_ifft_buf = Array{ComplexF64}(undef, 0, 0, 0)
     if use_fft && N >= 2
         fft_data = init_fft_grid(positions, radii, nois)
         nx, ny, nz = fft_data.cell_dim
         nb = fft_data.nblk_node
         anode_buf = zeros(ComplexF64, nx, ny, nz, nb, 2)
         gnode_buf = zeros(ComplexF64, nx, ny, nz, nb, 2)
-        fft_aft_buf = zeros(ComplexF64, 2nx, 2ny, 2nz)
+        fft_aft_batch = zeros(ComplexF64, 2nx, 2ny, 2nz, nb)
         fft_gft_buf = zeros(ComplexF64, 2nx, 2ny, 2nz, nb)
-        fft_ifft_buf = zeros(ComplexF64, 2nx, 2ny, 2nz)
     end
 
     # Unified A operator: FFT or direct
@@ -489,7 +487,7 @@ function solve_tmatrix(
         if fft_data !== nothing
             apply_A_fft!(out_vec, inp_vec, positions, fft_data,
                          offsets, half_nblks, nois, anode_buf, gnode_buf,
-                         fft_aft_buf, fft_gft_buf, fft_ifft_buf)
+                         fft_aft_batch, fft_gft_buf)
         else
             _apply_A!(out_vec, inp_vec, positions, offsets, half_nblks, nois)
         end

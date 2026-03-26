@@ -70,9 +70,9 @@ struct FFTGridData
     # Cached node-to-sphere reverse translation matrices
     # node_sphere_H[i] = H[hnb_sphere_i, nblk_node, 2]
     node_sphere_H ::Vector{Array{ComplexF64, 3}}
-    # FFTW plans
-    fft_plan  ::Any   # pre-planned forward FFT
-    ifft_plan ::Any   # pre-planned inverse FFT
+    # FFTW plans — batched along first 3 dims of (2nx, 2ny, 2nz, nblk) array
+    fft_plan_batch  ::Any   # pre-planned batched forward FFT (dims 1:3)
+    ifft_plan_batch ::Any   # pre-planned batched inverse FFT (dims 1:3)
 end
 
 # ─────────────────────────────────────────────────────────────
@@ -352,18 +352,18 @@ function init_fft_grid(
     sphere_to_node_H, node_to_sphere_H = _precompute_sphere_node_translations(
         positions, sphere_node, cell_boundary, d_cell, nois, node_order)
 
-    # Create FFTW plans for the convolution step
+    # Create batched FFTW plans: transform dims 1:3 of a (2nx, 2ny, 2nz, nblk) array
     nx, ny, nz = cell_dim
-    plan_buf = zeros(ComplexF64, 2nx, 2ny, 2nz)
-    fft_plan  = plan_fft!(plan_buf)
-    ifft_plan = plan_ifft!(plan_buf)
+    plan_buf_batch = zeros(ComplexF64, 2nx, 2ny, 2nz, nblk_node)
+    fft_plan_batch  = plan_fft!(plan_buf_batch, (1, 2, 3))
+    ifft_plan_batch = plan_ifft!(plan_buf_batch, (1, 2, 3))
 
     return FFTGridData(
         cell_dim, d_cell, cell_boundary, node_order, nblk_node,
         sphere_node, neighbor_offsets, neighbor_pairs,
         tran_p1, tran_p2,
         sphere_to_node_H, node_to_sphere_H,
-        fft_plan, ifft_plan
+        fft_plan_batch, ifft_plan_batch
     )
 end
 
@@ -449,18 +449,23 @@ function _node_to_sphere!(
 end
 
 """
-    _fft_node_to_node!(gnode, anode, fft_data, aft, gft, ifft_buf)
+    _fft_node_to_node!(gnode, anode, fft_data, aft_batch, gft)
 
 Perform FFT-based node-to-node translation (convolution in frequency domain).
-Work buffers `aft`, `gft`, `ifft_buf` should be pre-allocated for reuse across iterations.
+
+Uses batched FFT plans: forward/inverse FFT all nblk multipoles at once
+along spatial dims (1:3) of a (2nx, 2ny, 2nz, nblk) array.
+
+Work buffers:
+- `aft_batch`: (2nx, 2ny, 2nz, nblk) — zero-padded source coefficients in frequency domain
+- `gft`: (2nx, 2ny, 2nz, nblk) — accumulated target coefficients in frequency domain
 """
 function _fft_node_to_node!(
     gnode::Array{ComplexF64, 5},
     anode::Array{ComplexF64, 5},
     fft_data::FFTGridData,
-    aft::Array{ComplexF64, 3},
-    gft::Array{ComplexF64, 4},
-    ifft_buf::Array{ComplexF64, 3}
+    aft_batch::Array{ComplexF64, 4},
+    gft::Array{ComplexF64, 4}
 )
     nx, ny, nz = fft_data.cell_dim
     nblk = fft_data.nblk_node
@@ -469,31 +474,33 @@ function _fft_node_to_node!(
 
     for p in 1:2
         tran = p == 1 ? fft_data.cell_tran_fft_p1 : fft_data.cell_tran_fft_p2
+
+        # Zero-pad all source multipoles into aft_batch
+        fill!(aft_batch, zero(ComplexF64))
+        @inbounds for n in 1:nblk
+            aft_batch[1:nx, 1:ny, 1:nz, n] .= anode[1:nx, 1:ny, 1:nz, n, p]
+        end
+
+        # Batched forward FFT (all nblk at once along dims 1:3)
+        fft_data.fft_plan_batch * aft_batch
+
+        # Accumulate: gft[:,:,:,l] = Σ_n tran[:,:,:,l,n] * aft_batch[:,:,:,n]
         fill!(gft, zero(ComplexF64))
-
-        for n in 1:nblk
-            # Zero-pad input: copy cell_dim block into 2× grid
-            fill!(aft, zero(ComplexF64))
-            @inbounds aft[1:nx, 1:ny, 1:nz] .= anode[1:nx, 1:ny, 1:nz, n, p]
-
-            # Forward FFT
-            fft_data.fft_plan * aft
-
-            # Multiply by pre-FFT'd translation matrix and accumulate
-            @inbounds for l in 1:nblk
+        @inbounds for n in 1:nblk
+            aft_n = @view aft_batch[:, :, :, n]
+            for l in 1:nblk
                 tran_ln = @view tran[:, :, :, l, n]
-                gft_l = @view gft[:, :, :, l]
-                @. gft_l += tran_ln * aft
+                gft_l   = @view gft[:, :, :, l]
+                @. gft_l += tran_ln * aft_n
             end
         end
 
-        # Inverse FFT for each target multipole (use temp buffer for FFTW compatibility)
-        for l in 1:nblk
-            @inbounds ifft_buf .= @view gft[:, :, :, l]
-            fft_data.ifft_plan * ifft_buf
+        # Batched inverse FFT (all nblk at once along dims 1:3)
+        fft_data.ifft_plan_batch * gft
 
-            # Extract first cell_dim block (discard zero-padding)
-            @inbounds gnode[1:nx, 1:ny, 1:nz, l, p] .+= ifft_buf[1:nx, 1:ny, 1:nz]
+        # Extract first cell_dim block (discard zero-padding) and accumulate
+        @inbounds for l in 1:nblk
+            gnode[1:nx, 1:ny, 1:nz, l, p] .+= gft[1:nx, 1:ny, 1:nz, l]
         end
     end
 end
@@ -552,10 +559,15 @@ end
 
 """
     apply_A_fft!(out, inp, positions, fft_data, offsets, half_nblks, nois,
-                 anode_buf, gnode_buf, fft_aft, fft_gft, fft_ifft_buf)
+                 anode_buf, gnode_buf, fft_aft_batch, fft_gft)
 
 FFT-accelerated translation operator. Drop-in replacement for `_apply_A!`.
-Work buffers `fft_aft`, `fft_gft`, `fft_ifft_buf` are pre-allocated for reuse.
+
+Work buffers (pre-allocated for reuse across iterations):
+- `anode_buf`: (nx, ny, nz, nblk, 2) sphere→node coefficients
+- `gnode_buf`: (nx, ny, nz, nblk, 2) node→sphere results
+- `fft_aft_batch`: (2nx, 2ny, 2nz, nblk) batched FFT source buffer
+- `fft_gft`: (2nx, 2ny, 2nz, nblk) batched FFT target buffer
 """
 function apply_A_fft!(
     out::Vector{ComplexF64},
@@ -567,15 +579,14 @@ function apply_A_fft!(
     nois::Vector{Int},
     anode_buf::Array{ComplexF64, 5},
     gnode_buf::Array{ComplexF64, 5},
-    fft_aft::Array{ComplexF64, 3},
-    fft_gft::Array{ComplexF64, 4},
-    fft_ifft_buf::Array{ComplexF64, 3}
+    fft_aft_batch::Array{ComplexF64, 4},
+    fft_gft::Array{ComplexF64, 4}
 )
     # Step 1: Sphere → Node
     _sphere_to_node!(anode_buf, inp, fft_data, offsets, half_nblks, nois)
 
-    # Step 2: FFT node-to-node convolution
-    _fft_node_to_node!(gnode_buf, anode_buf, fft_data, fft_aft, fft_gft, fft_ifft_buf)
+    # Step 2: FFT node-to-node convolution (batched)
+    _fft_node_to_node!(gnode_buf, anode_buf, fft_data, fft_aft_batch, fft_gft)
 
     # Step 3: Node → Sphere
     _node_to_sphere!(out, gnode_buf, fft_data, offsets, half_nblks, nois)
