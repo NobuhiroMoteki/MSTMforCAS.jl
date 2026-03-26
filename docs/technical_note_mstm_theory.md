@@ -214,9 +214,35 @@ where $`\mathbf{r}`$ is the bilinear (not sesquilinear) residual and $`\varepsil
 
 ### Alternative solver: GMRES
 
-As an alternative to CBICG, the code also provides a GMRES (Generalized Minimal Residual) solver via Krylov.jl, selectable with `solver=:gmres`. GMRES requires only the forward operator $`\mathbf{L}\,\mathbf{v}`$ (no adjoint), at the cost of storing a Krylov basis of $`k`$ vectors (where $`k`$ is the iteration count). For the system sizes in this code ($`n \sim 10^4`$), the memory overhead is negligible (~14 MB for $`k = 18`$).
+As an alternative to CBICG, the code provides a GMRES (Generalized Minimal Residual) solver (Saad & Schultz 1986) via Krylov.jl, selectable with `solver=:gmres`. GMRES requires only the forward operator $`\mathbf{L}\,\mathbf{v}`$ (no adjoint) and minimises the 2-norm of the residual over a Krylov subspace.
 
-In practice, GMRES requires approximately twice as many iterations as CBICG to reach the same residual tolerance for this problem class, because the CBICG adjoint operator provides additional directional information that accelerates convergence. The total number of $`\mathbf{A}`$-operator applications is therefore similar between the two solvers (CBICG: $`k`$ iterations $`\times`$ 2 applications; GMRES: $`\sim 2k`$ iterations $`\times`$ 1 application), and the wall-clock performance is comparable. The default solver remains CBICG, consistent with the Fortran MSTM reference implementation.
+Given the system $`\mathbf{L}\,\mathbf{x} = \mathbf{b}`$ with initial guess $`\mathbf{x}_0`$ and initial residual $`\mathbf{r}_0 = \mathbf{b} - \mathbf{L}\,\mathbf{x}_0`$, GMRES constructs at iteration $`k`$ the Krylov subspace
+
+```math
+\mathcal{K}_k(\mathbf{L}, \mathbf{r}_0) = \mathrm{span}\{\mathbf{r}_0,\, \mathbf{L}\,\mathbf{r}_0,\, \mathbf{L}^2\,\mathbf{r}_0,\, \ldots,\, \mathbf{L}^{k-1}\,\mathbf{r}_0\}
+```
+
+and finds the approximate solution $`\mathbf{x}_k = \mathbf{x}_0 + \mathbf{z}_k`$ where $`\mathbf{z}_k \in \mathcal{K}_k`$ minimises the residual norm:
+
+```math
+\mathbf{z}_k = \arg\min_{\mathbf{z} \in \mathcal{K}_k} \|\mathbf{b} - \mathbf{L}\,(\mathbf{x}_0 + \mathbf{z})\|_2
+```
+
+The algorithm proceeds as follows:
+
+1. **Arnoldi process**: Build an orthonormal basis $`\{\mathbf{v}_1, \ldots, \mathbf{v}_k\}`$ of $`\mathcal{K}_k`$ via modified Gram–Schmidt. At each step $`j`$, one matrix-vector product $`\mathbf{w} = \mathbf{L}\,\mathbf{v}_j`$ is computed, followed by orthogonalisation against $`\mathbf{v}_1, \ldots, \mathbf{v}_j`$. This produces the upper Hessenberg matrix $`\bar{\mathbf{H}}_k \in \mathbb{C}^{(k+1) \times k}`$ such that $`\mathbf{L}\,\mathbf{V}_k = \mathbf{V}_{k+1}\,\bar{\mathbf{H}}_k`$.
+
+2. **Least-squares solve**: Minimise $`\|\beta\,\mathbf{e}_1 - \bar{\mathbf{H}}_k\,\mathbf{y}\|_2`$ where $`\beta = \|\mathbf{r}_0\|_2`$ and $`\mathbf{e}_1`$ is the first unit vector. This small $`(k+1) \times k`$ problem is solved efficiently via Givens rotations.
+
+3. **Solution update**: $`\mathbf{x}_k = \mathbf{x}_0 + \mathbf{V}_k\,\mathbf{y}_k`$.
+
+Key properties:
+- **1 operator application per iteration** (no adjoint needed), versus 2 for CBICG.
+- **Monotonically decreasing residual**: $`\|\mathbf{r}_k\|_2 \leq \|\mathbf{r}_{k-1}\|_2`$ by construction, unlike BiCG variants which can exhibit erratic convergence.
+- **Memory**: stores $`k`$ basis vectors of length $`n`$, i.e., $`O(kn)`$ total. For the system sizes in this code ($`n \sim 10^4`$, $`k \sim 30`$), this amounts to ~14 MB.
+- The implementation uses restarted GMRES(m) with $`m = 30`$ (Krylov.jl `memory` parameter), restarting the Arnoldi process if $`k`$ exceeds $`m`$.
+
+**Performance comparison with CBICG for this problem class**: GMRES requires approximately twice as many iterations as CBICG to reach the same residual tolerance, because the CBICG adjoint operator (computed via S-parity, Eq. (17)) provides additional directional information that accelerates convergence. The total number of $`\mathbf{A}`$-operator applications is therefore similar (CBICG: $`k`$ iterations $`\times`$ 2; GMRES: $`\sim 2k`$ iterations $`\times`$ 1), and the wall-clock performance is comparable. The default solver remains CBICG, consistent with the Fortran MSTM reference implementation.
 
 ### Incident plane wave coefficients
 
@@ -417,8 +443,9 @@ Input: sphere positions r_i, radii a_i, m_sphere, λ₀, n_med
 7. Mackowski, D.W. & Mishchenko, M.I. (2011). A multiple sphere T-matrix Fortran code for use on parallel computer clusters. *JQSRT*, 112(13), 2182–2192.
 8. Mishchenko, M.I., Travis, L.D. & Lacis, A.A. (2002). *Scattering, Absorption, and Emission of Light by Small Particles*. Cambridge University Press. [MI02]
 9. Moteki, N. & Adachi, K. (2024). CAS-v2 protocol. *Optics Express*, 32(21), 36500–36522.
-10. Wiscombe, W.J. (1980). Improved Mie scattering algorithms. *Applied Optics*, 19(9), 1505–1509.
-11. Xu, Y.-l. (1996). Calculation of the addition coefficients in electromagnetic multisphere-scattering theory. *J. Comput. Phys.*, 127(2), 285–298.
+10. Saad, Y. & Schultz, M.H. (1986). GMRES: A generalized minimal residual algorithm for solving nonsymmetric linear systems. *SIAM J. Sci. Stat. Comput.*, 7(3), 856–869.
+11. Wiscombe, W.J. (1980). Improved Mie scattering algorithms. *Applied Optics*, 19(9), 1505–1509.
+12. Xu, Y.-l. (1996). Calculation of the addition coefficients in electromagnetic multisphere-scattering theory. *J. Comput. Phys.*, 127(2), 285–298.
 
 ---
 
