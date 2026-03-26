@@ -437,17 +437,16 @@ function run_parameter_sweep(
                 should_flush = time_since_flush >= flush_interval || done == n_jobs
 
                 if should_flush
-                    elapsed   = now - t_sw
-                    w_done    = weight_done[]
-                    w_frac    = w_done / total_weight
-                    eta_s     = w_frac > 0 ? elapsed * (1.0 - w_frac) / w_frac : Inf
-                    eta_days  = isfinite(eta_s) ? eta_s / 86400.0 : Inf
+                    elapsed        = now - t_sw
+                    rate           = done / elapsed
+                    remaining_jobs = n_jobs_total - (done + n_skipped_count)
+                    remaining_days = rate > 0 ? remaining_jobs / rate / 86400.0 : Inf
 
-                    @printf("\n  [elapsed %s | ETA %.2f days]  %d / %d  (%.1f%%)  %.2f jobs/s",
-                        _fmt_hms(elapsed), eta_days,
+                    @printf("\n  [elapsed %s | remaining %.2f days]  %d / %d  (%.2f%%)  %.2f jobs/s",
+                        _fmt_hms(elapsed), remaining_days,
                         done + n_skipped_count, n_jobs_total,
                         100.0 * (done + n_skipped_count) / n_jobs_total,
-                        done / elapsed)
+                        rate)
 
                     # Snapshot: show last computed result
                     sr = snapshot_row[]
