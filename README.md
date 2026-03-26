@@ -438,7 +438,7 @@ All timings on a single core (no MPI, no multi-threading). Julia version: 1.11, 
 
 This task-level parallelism is far more efficient than parallelizing within a single solver call because: (1) each job is fully independent — zero inter-thread communication and synchronization, giving near-linear scaling; (2) intra-solver parallelism (e.g., threading the O(N²) translation loop) would require synchronization at every BiCG iteration, and Amdahl's law limits the practical speedup to 2–5×. For typical CAS parameter sweeps (thousands of jobs across aggregates, medium conditions, and refractive indices), task-level parallelism with C cores gives ~C× speedup as long as the number of jobs exceeds C.
 
-**Progress and crash recovery**: Results are flushed to HDF5 every ~60 seconds with a result snapshot (CAS amplitudes, Q_ext). ETA is estimated using cost-weighted progress (Np² for direct, Np for FFT mode). If the process is interrupted, restarting with the same output file automatically resumes from where it left off.
+**Progress and crash recovery**: Results are flushed to HDF5 every ~60 seconds with a result snapshot (CAS amplitudes, Q_ext). Remaining time is estimated from the observed job completion rate, displayed in days. If the process is interrupted, restarting with the same output file automatically resumes from where it left off.
 
 Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section. HDF5 writes are serialized via a lock.
 
