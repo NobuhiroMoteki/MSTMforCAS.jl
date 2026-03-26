@@ -26,6 +26,8 @@ module MSTMforCAS
 using LinearAlgebra
 using Printf
 using SpecialFunctions
+using Krylov
+using LinearOperators
 
 # Sub-modules — loaded in dependency order
 include("MieCoefficients.jl")

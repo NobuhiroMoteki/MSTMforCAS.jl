@@ -58,6 +58,7 @@ Base.@kwdef struct SweepConfig
     convergence_epsilon::Float64 = 1e-6
     use_fft::Bool            = false
     truncation_order::Union{Int,Nothing} = nothing
+    solver::Symbol           = :cbicg   # :cbicg or :gmres
 end
 
 """
@@ -198,13 +199,14 @@ function compute_scattering(
     max_iter::Int    = 200,
     use_fft::Bool    = false,
     truncation_order::Union{Int,Nothing} = nothing,
-    precomputed_fft::Union{FFTGridData, Nothing} = nothing
+    precomputed_fft::Union{FFTGridData, Nothing} = nothing,
+    solver::Symbol = :cbicg
 )::ScatteringResult
     positions_x = agg.positions .* k   # dimensionless (size parameters)
     radii_x     = agg.radii     .* k
     return compute_scattering(positions_x, radii_x, m_rel; tol=tol, max_iter=max_iter,
                               use_fft=use_fft, truncation_order=truncation_order,
-                              precomputed_fft=precomputed_fft)
+                              precomputed_fft=precomputed_fft, solver=solver)
 end
 
 # ─────────────────────────────────────────────────────────────
@@ -311,7 +313,8 @@ function run_parameter_sweep(
         m_rel0 = ri_grid[mis0[1]] / n_med0
         compute_scattering(agg0, m_rel0, k0;
             tol=config.convergence_epsilon, max_iter=config.max_iterations,
-            use_fft=config.use_fft, truncation_order=config.truncation_order)
+            use_fft=config.use_fft, truncation_order=config.truncation_order,
+            solver=config.solver)
     end
 
     # ── Progress + incremental HDF5 save ─────────────────────────────────────
@@ -355,7 +358,7 @@ function run_parameter_sweep(
             r = compute_scattering(agg, m_rel, k;
                 tol=config.convergence_epsilon, max_iter=config.max_iterations,
                 use_fft=config.use_fft, truncation_order=config.truncation_order,
-                precomputed_fft=fft_cache)
+                precomputed_fft=fft_cache, solver=config.solver)
 
             # MI02 amplitudes: S11=S2/(-ik), S22=S1/(-ik), S12=S3/(ik), S21=S4/(ik)
             ik = im * k

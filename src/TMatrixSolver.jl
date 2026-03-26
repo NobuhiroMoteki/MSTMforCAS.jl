@@ -371,7 +371,7 @@ end
         truncation_order::Union{Int,Nothing} = nothing
     ) -> (amn, converged, n_iter, noi_max, nois, offsets, half_nblks, rhs)
 
-Solve the multi-sphere T-matrix interaction equation using CBICG.
+Solve the multi-sphere T-matrix interaction equation.
 
 # Arguments
 - `positions`: [3, N] sphere center coordinates, already dimensionless (scaled by k_medium)
@@ -379,6 +379,8 @@ Solve the multi-sphere T-matrix interaction equation using CBICG.
 - `m_rel`: complex refractive index ratio (sphere / medium)
 - `truncation_order`: if specified, use this VSWF truncation order for all spheres
   instead of automatic determination. Must be ≥ the auto-determined order.
+- `solver`: `:cbicg` (default, Mackowski's Complex BiConjugate Gradient) or
+  `:gmres` (GMRES via Krylov.jl — requires only forward operator, no adjoint)
 
 # Returns
 - `amn`: Matrix{ComplexF64} of size (neqns, 2), solution coefficients for polarizations q=1,2.
@@ -399,7 +401,8 @@ function solve_tmatrix(
     normalize_error::Bool = true,
     use_fft::Bool = false,
     truncation_order::Union{Int,Nothing} = nothing,
-    precomputed_fft::Union{FFTGridData, Nothing} = nothing
+    precomputed_fft::Union{FFTGridData, Nothing} = nothing,
+    solver::Symbol = :cbicg
 )::Tuple{Matrix{ComplexF64}, Bool, Int, Int, Vector{Int}, Vector{Int}, Vector{Int}, Matrix{ComplexF64}}
 
     N = length(radii)
@@ -550,22 +553,39 @@ function solve_tmatrix(
     converged_both = true
     n_iter_max = 0
 
-    for q in 1:2
-        p_vec    = T_rhs[:, q]
-        norm2_p  = real(dot(p_vec, p_vec))
-
-        if norm2_p == 0.0
-            # Trivial: zero RHS → zero solution
-            amn[:, q] .= zero(ComplexF64)
-            continue
+    if solver == :gmres
+        # GMRES via Krylov.jl — only needs forward operator apply_L!, no adjoint
+        opL = LinearOperator(ComplexF64, neqns, neqns, false, false,
+                             (y, v) -> apply_L!(y, v))
+        for q in 1:2
+            p_vec = T_rhs[:, q]
+            if real(dot(p_vec, p_vec)) == 0.0
+                amn[:, q] .= zero(ComplexF64)
+                continue
+            end
+            x_sol, stats = gmres(opL, p_vec; rtol=tol, atol=0.0,
+                                 itmax=max_iter, memory=min(max_iter, 30))
+            amn[:, q]      .= x_sol
+            converged_both  = converged_both && stats.solved
+            n_iter_max      = max(n_iter_max, stats.niter)
         end
-
-        x_sol, conv, iters = _solve_bicg(
-            p_vec, apply_L!, apply_Lstar!, norm2_p, tol, max_iter
-        )
-        amn[:, q]      .= x_sol
-        converged_both  = converged_both && conv
-        n_iter_max      = max(n_iter_max, iters)
+    elseif solver == :cbicg
+        for q in 1:2
+            p_vec    = T_rhs[:, q]
+            norm2_p  = real(dot(p_vec, p_vec))
+            if norm2_p == 0.0
+                amn[:, q] .= zero(ComplexF64)
+                continue
+            end
+            x_sol, conv, iters = _solve_bicg(
+                p_vec, apply_L!, apply_Lstar!, norm2_p, tol, max_iter
+            )
+            amn[:, q]      .= x_sol
+            converged_both  = converged_both && conv
+            n_iter_max      = max(n_iter_max, iters)
+        end
+    else
+        error("Unknown solver: $solver. Use :cbicg or :gmres.")
     end
 
     return (amn, converged_both, n_iter_max, maximum(nois), nois, offsets, half_nblks, rhs)
