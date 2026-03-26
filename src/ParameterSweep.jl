@@ -317,12 +317,13 @@ function run_parameter_sweep(
             solver=config.solver)
     end
 
-    # ── Weighted ETA: estimate total work using Np^2 as proxy for cost ──────
-    # Build per-job weight and total remaining weight
-    job_weights = Float64[]  # weight per job, in group_list order
+    # ── Weighted ETA: estimate total work using cost proxy per job ───────────
+    # Direct mode: O(Np^2) per iteration → weight ∝ Np^2
+    # FFT mode:    O(Np + M log M) per iteration → weight ∝ Np (approx linear)
+    job_weights = Float64[]
     for (gk, mis) in group_list
-        np = aggregates[gk[1]].n_monomers
-        w  = Float64(np)^2   # O(N^2) for direct, also correlates for FFT
+        np = Float64(aggregates[gk[1]].n_monomers)
+        w  = config.use_fft ? np : np^2
         for _ in mis
             push!(job_weights, w)
         end
