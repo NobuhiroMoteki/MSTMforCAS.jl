@@ -324,8 +324,11 @@ function run_parameter_sweep(
     flush_every = max(Threads.nthreads() * 2, 100)
     t_sw        = time()
 
+    # ── Sort groups heavy-first for better dynamic load balancing ────────────
+    sort!(group_list, by = ((gk, mis),) -> -aggregates[gk[1]].n_monomers)
+
     # ── Parallel sweep (grouped by geometry+medium for FFT reuse) ────────────
-    Threads.@threads for gidx in 1:length(group_list)
+    Threads.@threads :dynamic for gidx in eachindex(group_list)
         (ai, mci), mi_list = group_list[gidx]
         agg     = aggregates[ai]
         wl, n_med = config.medium_conditions[mci]
