@@ -317,12 +317,27 @@ function run_parameter_sweep(
             solver=config.solver)
     end
 
-    # ── Progress + incremental HDF5 save ─────────────────────────────────────
+    # ── Weighted ETA: estimate total work using Np^2 as proxy for cost ──────
+    # Build per-job weight and total remaining weight
+    job_weights = Float64[]  # weight per job, in group_list order
+    for (gk, mis) in group_list
+        np = aggregates[gk[1]].n_monomers
+        w  = Float64(np)^2   # O(N^2) for direct, also correlates for FFT
+        for _ in mis
+            push!(job_weights, w)
+        end
+    end
+    total_weight    = sum(job_weights)
+    weight_done     = Threads.Atomic{Float64}(0.0)
+
+    # ── Progress state ────────────────────────────────────────────────────────
     n_done      = Threads.Atomic{Int}(0)
     io_lock     = ReentrantLock()
     save_buf    = NamedTuple[]
-    flush_every = max(Threads.nthreads() * 2, 100)
     t_sw        = time()
+    t_last_flush = Threads.Atomic{Float64}(t_sw)
+    snapshot_row = Ref{Union{NamedTuple, Nothing}}(nothing)  # last result for display
+    flush_interval = 60.0   # seconds — flush to HDF5 at least this often
 
     # ── Sort groups heavy-first for better dynamic load balancing ────────────
     sort!(group_list, by = ((gk, mis),) -> -aggregates[gk[1]].n_monomers)
@@ -333,13 +348,14 @@ function run_parameter_sweep(
         agg     = aggregates[ai]
         wl, n_med = config.medium_conditions[mci]
         k       = 2π * n_med / wl
+        np      = agg.n_monomers
+        job_w   = Float64(np)^2
 
         # Precompute FFT grid once per (aggregate, medium_condition) group
         local fft_cache::Union{FFTGridData, Nothing} = nothing
         if config.use_fft && agg.n_monomers >= 2 && length(mi_list) > 1
             positions_x = agg.positions .* k
             radii_x     = agg.radii     .* k
-            # Use the maximum Mie order across all m_rel in this group
             local max_noi = 0
             for mi in mi_list
                 m_rel_tmp = ri_grid[mi] / n_med
@@ -410,21 +426,47 @@ function run_parameter_sweep(
             )
 
             done = Threads.atomic_add!(n_done, 1) + 1
+            Threads.atomic_add!(weight_done, job_w)
+
             lock(io_lock) do
                 push!(save_buf, row)
-                if length(save_buf) >= flush_every || done == n_jobs
-                    elapsed = time() - t_sw
-                    rate    = elapsed > 0 ? done / elapsed : 0.0
-                    eta_s   = rate > 0 ? (n_jobs - done) / rate : Inf
-                    @printf("\r  [elapsed %s | ETA %s]  %d / %d  (%.1f%%)  %.1f jobs/s   ",
-                        _fmt_hms(elapsed), _fmt_hms(eta_s),
+                snapshot_row[] = row   # keep latest for display
+                now = time()
+                time_since_flush = now - t_last_flush[]
+                should_flush = time_since_flush >= flush_interval || done == n_jobs
+
+                if should_flush
+                    elapsed   = now - t_sw
+                    w_done    = weight_done[]
+                    w_frac    = w_done / total_weight
+                    eta_s     = w_frac > 0 ? elapsed * (1.0 - w_frac) / w_frac : Inf
+                    eta_days  = isfinite(eta_s) ? eta_s / 86400.0 : Inf
+
+                    @printf("\n  [elapsed %s | ETA %.2f days]  %d / %d  (%.1f%%)  %.2f jobs/s",
+                        _fmt_hms(elapsed), eta_days,
                         done + n_skipped_count, n_jobs_total,
                         100.0 * (done + n_skipped_count) / n_jobs_total,
-                        rate)
-                    if output_h5 !== nothing
+                        done / elapsed)
+
+                    # Snapshot: show last computed result
+                    sr = snapshot_row[]
+                    if sr !== nothing
+                        Ss_fwd = ComplexF64(sr.S11_fwd_re, sr.S11_fwd_im) +
+                                 im * ComplexF64(sr.S12_fwd_re, sr.S12_fwd_im)
+                        Sp_fwd = ComplexF64(sr.S22_fwd_re, sr.S22_fwd_im) -
+                                 im * ComplexF64(sr.S21_fwd_re, sr.S21_fwd_im)
+                        src_short = basename(sr.source)
+                        if length(src_short) > 40; src_short = src_short[1:37] * "..."; end
+                        @printf("\n    last: Np=%d m=%.3f+%.4fi Df=%.2f agg#%d  Ss=%.3e%+.3ei Sp=%.3e%+.3ei Q=%.4f",
+                            sr.n_monomers, sr.m_real, sr.m_imag, sr.Df, sr.agg_num,
+                            real(Ss_fwd), imag(Ss_fwd), real(Sp_fwd), imag(Sp_fwd), sr.Q_ext)
+                    end
+
+                    if output_h5 !== nothing && !isempty(save_buf)
                         _h5_append!(output_h5, save_buf)
                     end
                     empty!(save_buf)
+                    t_last_flush[] = now
                 end
             end
         end  # for mi
