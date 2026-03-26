@@ -15,7 +15,7 @@
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-03-18 (corresponds to MSTMforCAS.jl v0.1.1)}
+\date{Last updated: 2026-03-26 (corresponds to MSTMforCAS.jl v0.3.0)}
 
 \begin{document}
 \maketitle
@@ -265,6 +265,41 @@ The convergence criterion is:
 \end{equation}
 where $\bm{r}$ is the bilinear (not sesquilinear) residual and $\varepsilon = 10^{-6}$ is the default tolerance.
 
+\subsection{Alternative solver: GMRES}
+
+As an alternative to CBICG, the code provides a GMRES (Generalized Minimal Residual) solver (Saad \& Schultz 1986) via Krylov.jl, selectable with \texttt{solver=:gmres}.  GMRES requires only the forward operator $\mathbf{L}\,\bm{v}$ (no adjoint) and minimises the 2-norm of the residual over a Krylov subspace.
+
+Given the system $\mathbf{L}\,\bm{x} = \bm{b}$ with initial guess $\bm{x}_0$ and initial residual $\bm{r}_0 = \bm{b} - \mathbf{L}\,\bm{x}_0$, GMRES constructs at iteration $k$ the Krylov subspace
+\begin{equation}
+  \mathcal{K}_k(\mathbf{L}, \bm{r}_0) = \mathrm{span}\{\bm{r}_0,\, \mathbf{L}\,\bm{r}_0,\, \mathbf{L}^2\,\bm{r}_0,\, \ldots,\, \mathbf{L}^{k-1}\,\bm{r}_0\}
+  \label{eq:krylov-subspace}
+\end{equation}
+and finds the approximate solution $\bm{x}_k = \bm{x}_0 + \bm{z}_k$ where $\bm{z}_k \in \mathcal{K}_k$ minimises the residual norm:
+\begin{equation}
+  \bm{z}_k = \arg\min_{\bm{z} \in \mathcal{K}_k} \|\bm{b} - \mathbf{L}\,(\bm{x}_0 + \bm{z})\|_2.
+  \label{eq:gmres-minimisation}
+\end{equation}
+
+The algorithm proceeds as follows:
+\begin{enumerate}
+  \item \textbf{Arnoldi process.}  Build an orthonormal basis $\{\bm{v}_1, \ldots, \bm{v}_k\}$ of $\mathcal{K}_k$ via modified Gram--Schmidt.  At each step $j$, one matrix-vector product $\bm{w} = \mathbf{L}\,\bm{v}_j$ is computed, followed by orthogonalisation against $\bm{v}_1, \ldots, \bm{v}_j$.  This produces the upper Hessenberg matrix $\bar{\mathbf{H}}_k \in \mathbb{C}^{(k+1) \times k}$ such that $\mathbf{L}\,\mathbf{V}_k = \mathbf{V}_{k+1}\,\bar{\mathbf{H}}_k$.
+
+  \item \textbf{Least-squares solve.}  Minimise $\|\beta\,\bm{e}_1 - \bar{\mathbf{H}}_k\,\bm{y}\|_2$ where $\beta = \|\bm{r}_0\|_2$ and $\bm{e}_1$ is the first unit vector.  This small $(k{+}1) \times k$ problem is solved efficiently via Givens rotations.
+
+  \item \textbf{Solution update.}  $\bm{x}_k = \bm{x}_0 + \mathbf{V}_k\,\bm{y}_k$.
+\end{enumerate}
+
+Key properties:
+\begin{itemize}
+  \item \textbf{1 operator application per iteration} (no adjoint needed), versus 2 for CBICG.
+  \item \textbf{Monotonically decreasing residual}: $\|\bm{r}_k\|_2 \leq \|\bm{r}_{k-1}\|_2$ by construction, unlike BiCG variants which can exhibit erratic convergence.
+  \item \textbf{Memory}: stores $k$ basis vectors of length $n$, i.e., $O(kn)$ total.  For the system sizes in this code ($n \sim 10^4$, $k \sim 30$), this amounts to ${\sim}\SI{14}{\mega\byte}$.
+  \item The implementation uses restarted GMRES($m$) with $m = 30$ (Krylov.jl \texttt{memory} parameter), restarting the Arnoldi process if $k$ exceeds $m$.
+\end{itemize}
+
+\textbf{Performance comparison with CBICG for this problem class.}
+GMRES requires approximately twice as many iterations as CBICG to reach the same residual tolerance, because the CBICG adjoint operator (computed via S-parity, \eqref{eq:adjoint-symmetry}) provides additional directional information that accelerates convergence.  The total number of $\mathbf{A}$-operator applications is therefore similar (CBICG: $k$ iterations $\times$ 2; GMRES: $\sim 2k$ iterations $\times$ 1), and the wall-clock performance is comparable.  The default solver remains CBICG, consistent with the Fortran MSTM reference implementation.
+
 \subsection{Incident plane wave coefficients}
 
 For $z$-axis incidence ($\beta = 0$, $\alpha = 0$), only the $m = \pm 1$ multipole components are non-zero due to the azimuthal symmetry of a circularly decomposed plane wave.
@@ -450,7 +485,8 @@ where $S_s^\mathrm{fwd}$ and $S_p^\mathrm{fwd}$ are the forward scattering ampli
   lr\_tran T-matrix & \eqref{eq:tmatrix-lr} & \texttt{build\_tmatrix} & \texttt{TMatrixSolver.jl} \\
   Translation $\mathbf{H}_{ij}$ & \eqref{eq:axial-translation}--\eqref{eq:lr-translation} & \texttt{translate\_coefs} & \texttt{TranslationCoefs.jl} \\
   FFT translation & \eqref{eq:fft-convolution} & \texttt{fft\_translate}, \texttt{setup\_fft\_grid} & \texttt{FFTTranslation.jl} \\
-  CBICG solver & \eqref{eq:global-system}, \eqref{eq:adjoint-symmetry}--\eqref{eq:convergence} & \texttt{solve\_bicg} & \texttt{TMatrixSolver.jl} \\
+  CBICG solver & \eqref{eq:global-system}, \eqref{eq:adjoint-symmetry}--\eqref{eq:convergence} & \texttt{\_solve\_bicg} & \texttt{TMatrixSolver.jl} \\
+  GMRES solver (optional) & \eqref{eq:global-system}, \eqref{eq:krylov-subspace}--\eqref{eq:gmres-minimisation} & \texttt{gmres} (Krylov.jl) & \texttt{TMatrixSolver.jl} \\
   Incident coefficients & \eqref{eq:pinc-q1}--\eqref{eq:pinc-q2} & \texttt{incident\_coefficients} & \texttt{TMatrixSolver.jl} \\
   Common-origin expansion & \eqref{eq:common-origin}--\eqref{eq:mode-transform} & \texttt{translate\_to\_common\_origin} & \texttt{ScatteringAmplitude.jl} \\
   BH83 amplitudes $S_1$--$S_4$ & \eqref{eq:bh83-amplitude}--\eqref{eq:amplitude-sum} & \texttt{compute\_amplitude\_matrix} & \texttt{ScatteringAmplitude.jl} \\
@@ -476,6 +512,7 @@ where $S_s^\mathrm{fwd}$ and $S_p^\mathrm{fwd}$ are the forward scattering ampli
   \item Mackowski, D.W.\ \& Mishchenko, M.I.\ (2011). A multiple sphere T-matrix Fortran code for use on parallel computer clusters. \textit{JQSRT}, 112(13), 2182--2192.
   \item Mishchenko, M.I., Travis, L.D.\ \& Lacis, A.A.\ (2002). \textit{Scattering, Absorption, and Emission of Light by Small Particles}. Cambridge University Press. [MI02]
   \item Moteki, N.\ \& Adachi, K.\ (2024). CAS-v2 protocol. \textit{Optics Express}, 32(21), 36500--36522.
+  \item Saad, Y.\ \& Schultz, M.H.\ (1986). GMRES: A generalized minimal residual algorithm for solving nonsymmetric linear systems. \textit{SIAM J.\ Sci.\ Stat.\ Comput.}, 7(3), 856--869.
   \item Wiscombe, W.J.\ (1980). Improved Mie scattering algorithms. \textit{Applied Optics}, 19(9), 1505--1509.
   \item Xu, Y.-l.\ (1996). Calculation of the addition coefficients in electromagnetic multisphere-scattering theory. \textit{J.\ Comput.\ Phys.}, 127(2), 285--298.
 \end{enumerate}
