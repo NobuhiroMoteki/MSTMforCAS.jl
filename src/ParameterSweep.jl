@@ -55,7 +55,7 @@ Base.@kwdef struct SweepConfig
     m_real_range::Tuple{Float64,Float64,Int}
     m_imag_range::Tuple{Float64,Float64,Int}
     max_iterations::Int      = 200
-    convergence_epsilon::Float64 = 1e-6
+    convergence_epsilon::Float64 = 1e-5
     use_fft::Bool            = false
     truncation_order::Union{Int,Nothing} = nothing
 end
