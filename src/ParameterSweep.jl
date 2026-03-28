@@ -388,7 +388,7 @@ function run_parameter_sweep(
         wl, n_med = config.medium_conditions[mci]
         k       = 2π * n_med / wl
         np      = agg.n_monomers
-        job_w   = Float64(np)^2
+        job_w   = effective_use_fft ? Float64(np) : Float64(np)^2
 
         # Precompute FFT grid once per (aggregate, medium_condition) group
         local fft_cache::Union{FFTGridData, Nothing} = nothing
@@ -410,7 +410,7 @@ function run_parameter_sweep(
         end
 
         # ── Record one result (shared by GPU and CPU paths) ─────────────
-        function _record_one!(r, m_abs::ComplexF64)
+        function _record_one!(r, m_abs::ComplexF64; force_flush::Bool=false)
             ik = im * k
             S11_fwd = r.S_forward[2] / (-ik);  S22_fwd = r.S_forward[1] / (-ik)
             S12_fwd = r.S_forward[3] / (ik);   S21_fwd = r.S_forward[4] / (ik)
@@ -464,7 +464,7 @@ function run_parameter_sweep(
                 snapshot_row[] = row
                 now = time()
                 time_since_flush = now - t_last_flush[]
-                should_flush = time_since_flush >= flush_interval || done == n_jobs
+                should_flush = time_since_flush >= flush_interval || done == n_jobs || force_flush
 
                 if should_flush
                     elapsed        = now - t_sw
@@ -505,8 +505,10 @@ function run_parameter_sweep(
             ri_batch = [ri_grid[mi] for mi in mi_list]
             # Callback: record each result as soon as its batch completes
             # (enables incremental HDF5 flush and crash recovery)
+            n_ri_in_group = length(ri_batch)
             function _on_gpu_result(ri_idx, r, _amn)
-                _record_one!(r, ri_batch[ri_idx])
+                # Force flush on last RI of each group to ensure progress display
+                _record_one!(r, ri_batch[ri_idx]; force_flush=(ri_idx == n_ri_in_group))
             end
             _gpu_batch_solve_ref[](
                 agg, k, ri_batch, n_med, fft_cache,
