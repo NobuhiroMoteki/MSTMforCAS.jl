@@ -49,9 +49,7 @@ println("  H5:  $h5_file")
 println("  CSV: $csv_file")
 println("  Aggregate ID: $agg_id")
 
-# agg_num range for this machine (0-3 here; 4-5 on other machine)
-agg_num_lo, agg_num_hi = 0, 3
-aggregates = read_aggregate_catalog(h5_file, csv_file; agg_num_range=(agg_num_lo, agg_num_hi))
+aggregates = read_aggregate_catalog(h5_file, csv_file)
 
 println("  Loaded $(length(aggregates)) aggregates")
 println()
@@ -95,7 +93,7 @@ println()
 # ─── Output path ─────────────────────────────────────────────────────────────
 results_dir = joinpath(@__DIR__, "..", "data", "results")
 mkpath(results_dir)
-output_h5 = joinpath(results_dir, "results_fullsweep_agg$(agg_id)_num$(agg_num_lo)-$(agg_num_hi).h5")
+output_h5 = joinpath(results_dir, "results_fullsweep_agg$(agg_id).h5")
 
 println("Output: $output_h5")
 if isfile(output_h5)
