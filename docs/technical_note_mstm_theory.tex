@@ -15,7 +15,7 @@
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-03-28 (corresponds to MSTMforCAS.jl v1.0.1)}
+\date{Last updated: 2026-03-28 (corresponds to MSTMforCAS.jl v1.0.2)}
 
 \begin{document}
 \maketitle
@@ -362,12 +362,15 @@ For a fixed (aggregate, medium condition) group, the translation operator $\math
 The GPU solver exploits this by processing $B$ RI values simultaneously: it uploads the shared FFT translation data to GPU once, then solves $B$ independent CBICG systems $(\mathbf{I} - \mathbf{T}_b \mathbf{A})\bm{x}_b = \mathbf{T}_b\bm{p}_\mathrm{inc}$ in parallel, where only $\mathbf{T}_b$ (the Mie T-matrix) varies per RI.
 
 For large aggregates ($N_p \gtrsim 500$), the CPU phases of each batch (preparation of RHS vectors and post-processing of solutions) dominate wall time and leave the GPU idle.
-This bottleneck is addressed by two complementary measures:
+This bottleneck is addressed by three complementary measures:
 \begin{enumerate}
   \item \textbf{Intra-group CPU parallelism}: batch preparation and post-processing are parallelised over the $B$ batch items using \texttt{Threads.@threads}, reducing the CPU-phase time by a factor of $C$ (number of Julia threads).
   \item \textbf{Hybrid GPU+CPU dispatch}: groups with $N_p \leq$ \texttt{gpu\_np\_threshold} (default 500) are processed by CPU threads running \emph{concurrently} with the GPU task via \texttt{Threads.@spawn}, so no CPU core sits idle while the GPU handles a large-aggregate batch.
+  \item \textbf{Batched common-origin translation} (v0.4.0): the common-origin translation matrices $\mathbf{J}_{0i}$ (Eq.~\eqref{eq:common-origin}) depend only on geometry, not on the refractive index.
+  They are computed once per group (not once per RI value) and applied to all $B$ solutions simultaneously via a BLAS GEMM: $(\mathbf{J}_{0i}\,\bm{a}^{(i)})_\text{batch} = \mathbf{J}_{0i} \times \bm{A}_\text{batch}$, where $\bm{A}_\text{batch}$ has shape $(N_\text{hnb}, 2B)$.
+  This reduces \texttt{compute\_translation\_matrix} calls from $N_S \times n_\text{RI}$ to $N_S$ per group.
 \end{enumerate}
-Running with \texttt{julia -t auto} activates both mechanisms.
+Running with \texttt{julia -t auto} activates all mechanisms.
 Measured on an RTX~A6000 with a 24-core CPU (CAS sweep, $N_p = 350$--$2800$, FP32 mode), the hybrid implementation achieves ${\sim}6$ jobs/s versus ${\sim}0.8$ jobs/s without threading — a factor of ${\sim}7\times$ speedup.
 
 A Float32 precision mode is available (\texttt{gpu\_float32=true}): Mie coefficients and the RHS are computed in Float64 on CPU, while the iterative solver runs in ComplexF32 on GPU.
