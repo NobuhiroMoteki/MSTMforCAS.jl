@@ -342,21 +342,128 @@ function gpu_batch_solve_group(
         return (amn=amn, converged=conv, iters=iters)
     end
 
-    # ── Post-process one batch on CPU + invoke on_result callback ──────────
+    # ── Common-origin geometry: precomputed once per group ────────────────
+    # r0, ntrani, nodrt are geometry-only (no RI dependence), so computing
+    # them once avoids N×n_ri redundant _tranordertest and
+    # compute_translation_matrix calls (the dominant post-processing cost).
+    r0 = vec(sum(positions_x, dims=2)) ./ N
+    ntrani_g = Vector{Int}(undef, N)
+    for i in 1:N
+        dist = sqrt(sum(abs2, r0 .- positions_x[:, i]))
+        ntrani_g[i] = MSTMforCAS._tranordertest(dist, nois[i], 1e-5)
+    end
+    nodrt_g = maximum(ntrani_g)
+    hnb0_g  = nodrt_g * (nodrt_g + 2)
+    x_eff   = cbrt(sum(r^3 for r in radii_x))
+    norm_fac = 2.0 / x_eff^2
+
+    # ── Post-process entire batch at once (batched GEMM over B RI) ─────────
+    # compute_translation_matrix called N times (once per sphere, not N×bs).
+    # H_i @ amn_all computed via BLAS GEMM over all bs RI simultaneously.
     function _postprocess_batch!(results_ref, batch_start_local, prep, sol)
         bs = size(sol.amn, 3)
-        # Parallel over batch items: _postprocess_scattering is pure CPU (no shared state).
-        # on_result/_record_one! is protected by io_lock and is thread-safe.
+
+        # Q_ext for all RI: fast parallel dot products (independent per RI)
+        Q_ext_all = Vector{Float64}(undef, bs)
+        Threads.@threads for bi in 1:bs
+            s = 0.0
+            for q in 1:2
+                s += real(dot(view(sol.amn, :, q, bi), view(prep.rhs_inc, :, q, bi)))
+            end
+            Q_ext_all[bi] = -norm_fac * s
+        end
+
+        # Common-origin translation: H_i computed once, applied to all bs RI.
+        # amn0_mode1/mode2: (hnb0_g, 2, bs) — accumulator for all spheres.
+        amn0_mode1 = zeros(ComplexF64, hnb0_g, 2, bs)
+        amn0_mode2 = zeros(ComplexF64, hnb0_g, 2, bs)
+
+        # Reusable work buffers for per-sphere p1/p2 extraction: (hnb, 2*bs)
+        max_hnb = maximum(half_nblks)
+        work_p1 = Matrix{ComplexF64}(undef, max_hnb, 2 * bs)
+        work_p2 = Matrix{ComplexF64}(undef, max_hnb, 2 * bs)
+
+        for i in 1:N
+            off   = offsets[i]
+            hnb   = half_nblks[i]
+            noi   = nois[i]
+            ntri  = ntrani_g[i]
+            hnb_i = ntri * (ntri + 2)
+
+            r_trans = r0 .- positions_x[:, i]
+            dist = sqrt(r_trans[1]^2 + r_trans[2]^2 + r_trans[3]^2)
+
+            # Extract p1/p2 blocks for all RI into contiguous (hnb, 2*bs) matrices
+            @inbounds for bi in 1:bs, q in 1:2
+                col = (bi - 1) * 2 + q
+                for mn in 1:hnb
+                    work_p1[mn, col] = sol.amn[off + mn, q, bi]
+                    work_p2[mn, col] = sol.amn[off + hnb + mn, q, bi]
+                end
+            end
+            p1 = view(work_p1, 1:hnb, :)
+            p2 = view(work_p2, 1:hnb, :)
+
+            if dist < 1e-10
+                # Zero displacement: direct accumulation
+                n_copy = min(hnb, hnb_i)
+                @inbounds for bi in 1:bs, q in 1:2
+                    col = (bi - 1) * 2 + q
+                    for mn in 1:n_copy
+                        v1 = work_p1[mn, col]; v2 = work_p2[mn, col]
+                        amn0_mode1[mn, q, bi] += v1 + v2
+                        amn0_mode2[mn, q, bi] += v1 - v2
+                    end
+                end
+            else
+                # Compute H_i ONCE for this sphere (geometry-only, RI-independent)
+                H = MSTMforCAS.compute_translation_matrix(
+                    r_trans, ComplexF64(1.0), noi, ntri; use_regular=true)
+                H_p1 = H[:, :, 1]  # (hnb_i, hnb)
+                H_p2 = H[:, :, 2]  # (hnb_i, hnb)
+
+                # BLAS GEMM: (hnb_i × hnb) × (hnb × 2bs) → (hnb_i × 2bs)
+                # Applies H_i to all bs RI values in one kernel call.
+                r1 = H_p1 * p1
+                r2 = H_p2 * p2
+
+                # Accumulate into amn0: un-interleave (hnb_i, 2bs) → (hnb_i, 2, bs)
+                @inbounds for bi in 1:bs, q in 1:2
+                    col = (bi - 1) * 2 + q
+                    for kl in 1:hnb_i
+                        v1 = r1[kl, col]; v2 = r2[kl, col]
+                        amn0_mode1[kl, q, bi] += v1 + v2
+                        amn0_mode2[kl, q, bi] += v1 - v2
+                    end
+                end
+            end
+        end
+
+        # Per-RI observables: Q_sca, Q_abs, S amplitudes (parallel)
         Threads.@threads for bi in 1:bs
             ri_idx = batch_start_local + bi - 1
-            amn_bi = sol.amn[:, :, bi]          # slice copy — independent per thread
-            rhs_bi = prep.rhs_inc[:, :, bi]     # read-only slice
-            result = _postprocess_scattering(
-                amn_bi, rhs_bi,
-                positions_x, radii_x, nois, offsets, half_nblks, noi_max,
-                sol.converged[bi], sol.iters[bi])
+            amn0_m1 = amn0_mode1[:, :, bi]
+            amn0_m2 = amn0_mode2[:, :, bi]
+
+            Q_sca_sum = 0.0
+            for q in 1:2
+                Q_sca_sum += real(dot(amn0_m1[:, q], amn0_m1[:, q]))
+                Q_sca_sum += real(dot(amn0_m2[:, q], amn0_m2[:, q]))
+            end
+            Q_sca = norm_fac * Q_sca_sum / 2
+            Q_abs = Q_ext_all[bi] - Q_sca
+
+            sa_fwd = MSTMforCAS._amplitude_from_mode_coefs(amn0_m1, amn0_m2, nodrt_g, true)
+            sa_bwd = MSTMforCAS._amplitude_from_mode_coefs(amn0_m1, amn0_m2, nodrt_g, false)
+            bh83_fwd = ntuple(j -> -2 * sa_fwd[j], 4)
+            bh83_bwd = ntuple(j -> -2 * sa_bwd[j], 4)
+
+            amn_bi = sol.amn[:, :, bi]
+            result = MSTMforCAS.ScatteringResult(
+                bh83_fwd, bh83_bwd,
+                Q_ext_all[bi], Q_abs, Q_sca,
+                sol.converged[bi], sol.iters[bi], noi_max)
             results_ref[ri_idx] = (result, amn_bi)
-            # Incremental callback: enables HDF5 flush before next batch
             if on_result !== nothing
                 on_result(ri_idx, result, amn_bi)
             end
@@ -406,66 +513,3 @@ function gpu_batch_solve_group(
     return results
 end
 
-# ─────────────────────────────────────────────────────────────
-# Post-processing: compute Q and S from solved amn (CPU)
-# ─────────────────────────────────────────────────────────────
-
-function _postprocess_scattering(
-    amn::Matrix{ComplexF64},
-    rhs::Matrix{ComplexF64},
-    positions::Matrix{Float64},
-    radii::Vector{Float64},
-    nois::Vector{Int},
-    offsets::Vector{Int},
-    half_nblks::Vector{Int},
-    noi_max::Int,
-    converged::Bool,
-    n_iter::Int
-)::MSTMforCAS.ScatteringResult
-
-    N = length(radii)
-    x_eff = cbrt(sum(r^3 for r in radii))
-    norm_fac = 2.0 / x_eff^2
-
-    # Q_ext (optical theorem)
-    Q_ext_sum = 0.0
-    for q in 1:2
-        Q_ext_sum += real(dot(view(amn, :, q), view(rhs, :, q)))
-    end
-    Q_ext = -norm_fac * Q_ext_sum
-
-    # Common-origin translation
-    r0 = vec(sum(positions, dims=2)) ./ N
-    ntrani = Vector{Int}(undef, N)
-    for i in 1:N
-        dist = sqrt(sum(abs2, r0 .- positions[:, i]))
-        ntrani[i] = MSTMforCAS._tranordertest(dist, nois[i], 1e-5)
-    end
-    nodrt = maximum(ntrani)
-
-    hnb0 = nodrt * (nodrt + 2)
-    amn0_mode1 = zeros(ComplexF64, hnb0, 2)
-    amn0_mode2 = zeros(ComplexF64, hnb0, 2)
-    MSTMforCAS._merge_to_origin!(amn0_mode1, amn0_mode2, amn, positions, r0,
-                                  nois, offsets, half_nblks, nodrt, ntrani)
-
-    # Q_sca
-    Q_sca_sum = 0.0
-    for q in 1:2
-        Q_sca_sum += real(dot(amn0_mode1[:, q], amn0_mode1[:, q]))
-        Q_sca_sum += real(dot(amn0_mode2[:, q], amn0_mode2[:, q]))
-    end
-    Q_sca = norm_fac * Q_sca_sum / 2
-    Q_abs = Q_ext - Q_sca
-
-    # S amplitudes
-    sa_fwd = MSTMforCAS._amplitude_from_mode_coefs(amn0_mode1, amn0_mode2, nodrt, true)
-    sa_bwd = MSTMforCAS._amplitude_from_mode_coefs(amn0_mode1, amn0_mode2, nodrt, false)
-    bh83_fwd = ntuple(i -> -2 * sa_fwd[i], 4)
-    bh83_bwd = ntuple(i -> -2 * sa_bwd[i], 4)
-
-    return MSTMforCAS.ScatteringResult(
-        bh83_fwd, bh83_bwd,
-        Q_ext, Q_abs, Q_sca,
-        converged, n_iter, noi_max)
-end
