@@ -272,7 +272,9 @@ function gpu_batch_solve_group(
         td_all  = zeros(ComplexF64, noi_max, bs)  # for upload_batch_mie
         to_all  = zeros(ComplexF64, noi_max, bs)
 
-        for (bi, m_abs) in enumerate(ri_batch_local)
+        # Parallel over batch items: each bi writes to independent array slices
+        Threads.@threads for bi in eachindex(ri_batch_local)
+            m_abs = ri_batch_local[bi]
             m_rel = m_abs / n_med
             mie_vecs = [MSTMforCAS.compute_mie_coefficients(radii_x[s], m_rel; nmax=noi_max) for s in 1:N]
             td_vecs, to_vecs = MSTMforCAS._precompute_T_values(mie_vecs, nois)
@@ -343,11 +345,14 @@ function gpu_batch_solve_group(
     # ── Post-process one batch on CPU + invoke on_result callback ──────────
     function _postprocess_batch!(results_ref, batch_start_local, prep, sol)
         bs = size(sol.amn, 3)
-        for bi in 1:bs
+        # Parallel over batch items: _postprocess_scattering is pure CPU (no shared state).
+        # on_result/_record_one! is protected by io_lock and is thread-safe.
+        Threads.@threads for bi in 1:bs
             ri_idx = batch_start_local + bi - 1
-            amn_bi = sol.amn[:, :, bi]
+            amn_bi = sol.amn[:, :, bi]          # slice copy — independent per thread
+            rhs_bi = prep.rhs_inc[:, :, bi]     # read-only slice
             result = _postprocess_scattering(
-                amn_bi, prep.rhs_inc[:, :, bi],
+                amn_bi, rhs_bi,
                 positions_x, radii_x, nois, offsets, half_nblks, noi_max,
                 sol.converged[bi], sol.iters[bi])
             results_ref[ri_idx] = (result, amn_bi)

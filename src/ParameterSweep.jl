@@ -69,6 +69,10 @@ Base.@kwdef struct SweepConfig
     solver::Symbol           = :cbicg   # :cbicg or :gmres
     use_gpu::Bool            = false
     gpu_float32::Bool        = false
+    # Hybrid GPU+CPU threshold: groups with n_monomers <= gpu_np_threshold are
+    # processed by CPU threads while the GPU handles larger groups concurrently.
+    # 0 = all groups use GPU (original behaviour). Default 500 works well for 16+ cores.
+    gpu_np_threshold::Int    = 500
 end
 
 """
@@ -381,9 +385,11 @@ function run_parameter_sweep(
     sort!(group_list, by = ((gk, mis),) -> -aggregates[gk[1]].n_monomers)
 
     # ── Sweep (grouped by geometry+medium for FFT reuse) ─────────────────────
-    # GPU mode: sequential outer loop (GPU provides parallelism within each group).
+    # GPU mode: sequential outer loop for large-Np groups (GPU provides parallelism
+    #   within each group); CPU threads process small-Np groups concurrently.
     # CPU mode: threaded outer loop with dynamic scheduling.
-    _sweep_body! = function (gidx)
+    # force_cpu=true: use CPU FFT path even when gpu_active (for hybrid small-Np groups)
+    _sweep_body! = function (gidx; force_cpu::Bool=false)
         (ai, mci), mi_list = group_list[gidx]
         agg     = aggregates[ai]
         wl, n_med = config.medium_conditions[mci]
@@ -501,8 +507,9 @@ function run_parameter_sweep(
             end
         end  # _record_one!
 
-        # ── GPU batch path ────────────────────────────────────────────────
-        if gpu_active
+        # ── GPU batch path or CPU path ────────────────────────────────────
+        use_gpu_here = gpu_active && !force_cpu
+        if use_gpu_here
             ri_batch = [ri_grid[mi] for mi in mi_list]
             # Callback: record each result as soon as its batch completes
             # (enables incremental HDF5 flush and crash recovery)
@@ -534,11 +541,38 @@ function run_parameter_sweep(
         end
     end  # _sweep_body!
 
-    # Dispatch: GPU mode runs sequentially (GPU provides parallelism);
-    # CPU mode uses threaded loop with dynamic scheduling.
+    # ── Dispatch ─────────────────────────────────────────────────────────────
+    # GPU hybrid mode (gpu_np_threshold > 0):
+    #   - GPU task: large-Np groups processed sequentially with batched BiCG;
+    #               CPU prep/post parallelised via Threads.@threads inside the
+    #               GPU batch solver (Approach A).
+    #   - CPU threads: small-Np groups processed in parallel concurrently with
+    #                  the GPU task (Approach B).
+    # CPU-only mode: threaded outer loop with dynamic scheduling.
     if gpu_active
-        for gidx in eachindex(group_list)
-            _sweep_body!(gidx)
+        np_thresh = config.gpu_np_threshold
+        gpu_idxs = [i for i in eachindex(group_list)
+                    if aggregates[group_list[i][1][1]].n_monomers > np_thresh]
+        cpu_idxs = [i for i in eachindex(group_list)
+                    if aggregates[group_list[i][1][1]].n_monomers <= np_thresh]
+
+        if isempty(cpu_idxs)
+            # All groups go to GPU (threshold=0 or all aggregates are large)
+            for gidx in gpu_idxs
+                _sweep_body!(gidx)
+            end
+        else
+            @info "Hybrid GPU+CPU mode" gpu_groups=length(gpu_idxs) cpu_groups=length(cpu_idxs) np_threshold=np_thresh
+            # GPU task runs on its own thread; CPU threads handle the rest simultaneously
+            gpu_task = Threads.@spawn begin
+                for gidx in gpu_idxs
+                    _sweep_body!(gidx)
+                end
+            end
+            Threads.@threads :dynamic for gidx in cpu_idxs
+                _sweep_body!(gidx; force_cpu=true)
+            end
+            wait(gpu_task)
         end
     else
         Threads.@threads :dynamic for gidx in eachindex(group_list)
