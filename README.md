@@ -452,6 +452,8 @@ This task-level parallelism is far more efficient than parallelizing within a si
 
 The speedup is most significant for large aggregates where the solver requires many iterations. For small aggregates (Np~100, ~4 iterations), the improvement is marginal. The continuation is applied automatically within each (aggregate, medium_condition) group and has zero overhead when not beneficial (dimension mismatch triggers automatic fallback to the default initial guess).
 
+**Snake-path grid traversal** (v0.4.1): The 2-D refractive index grid ($m_\mathrm{real} \times m_\mathrm{imag}$) is traversed in a snake (boustrophedon) pattern — the $m_\mathrm{imag}$ sweep direction alternates on each $m_\mathrm{real}$ row. This keeps consecutive grid points at a uniform step size ($|\Delta m| = 0.05$ for a typical 18×26 grid), eliminating the large jumps ($|\Delta m| \approx 1.25$) at row boundaries that occur with naive raster ordering. This maximizes continuation effectiveness at all grid points.
+
 **Progress and crash recovery**: Results are flushed to HDF5 every ~60 seconds with a result snapshot (CAS amplitudes, Q_ext). Remaining time is estimated from the observed job completion rate, displayed in days. If the process is interrupted, restarting with the same output file automatically resumes from where it left off.
 
 Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section. HDF5 writes are serialized via a lock.

@@ -15,7 +15,7 @@
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-03-26 (corresponds to MSTMforCAS.jl v0.3.0)}
+\date{Last updated: 2026-03-28 (corresponds to MSTMforCAS.jl v0.4.1)}
 
 \begin{document}
 \maketitle
@@ -340,6 +340,21 @@ When the refractive index changes from $m_j$ to $m_{j+1}$, only the Mie coeffici
 The continuation is applied automatically in the parameter sweep (\texttt{run\_parameter\_sweep}): within each (aggregate, medium condition) group, the solver coefficients $\bm{x}$ from the previous refractive index grid point are passed as the initial guess to the next.  If the equation system size changes (e.g., due to a change in the converged Mie truncation order), the continuation is skipped and the default initial guess is used.
 
 Benchmarks (1000 spheres, FFT mode, $\Delta m \approx 0.05$) show a reduction from 15 to 9--11 iterations per grid point, corresponding to a wall-time speedup of approximately $1.2\times$.  For smaller aggregates ($N_p \sim 100$) where the cold-start solver already converges in 3--4 iterations, the improvement is marginal.
+
+\paragraph{Snake-path grid traversal.}
+The effectiveness of the continuation method depends critically on the step size $|m_{j+1} - m_j|$ between consecutive grid points.
+For a 2-D grid of $N_r \times N_i$ points spanning the real and imaginary parts of $m$, a naive row-major (raster) traversal sweeps $m_\mathrm{imag}$ from min to max for each value of $m_\mathrm{real}$, then resets to the minimum when advancing to the next $m_\mathrm{real}$ row.
+At each row boundary this produces a jump $\Delta m_\mathrm{imag} = m_\mathrm{imag,max} - m_\mathrm{imag,min}$, which can be much larger than the intra-row step.
+
+The \emph{snake-path} (boustrophedon) traversal eliminates this problem by reversing the sweep direction of $m_\mathrm{imag}$ on alternate rows:
+\begin{equation*}
+  \text{row}~k : \quad m_\mathrm{imag} = \begin{cases}
+    m_\mathrm{imag,min} \to m_\mathrm{imag,max} & k~\text{odd}, \\
+    m_\mathrm{imag,max} \to m_\mathrm{imag,min} & k~\text{even}.
+  \end{cases}
+\end{equation*}
+This ensures that consecutive grid points always differ by either $\Delta m_\mathrm{real}$ or $\Delta m_\mathrm{imag}$ (one intra-row step), never by the full range.
+For the typical CAS sweep grid ($18 \times 26$, $m_\mathrm{real} \in [1.55, 2.4]$, $m_\mathrm{imag} \in [0.15, 1.4]$), the maximum step size drops from $|{\Delta m}| \approx 1.25$ (raster) to $|{\Delta m}| = 0.05$ (snake), a factor of 25 improvement at each of the 17 row boundaries.
 
 \subsection{Incident plane wave coefficients}
 

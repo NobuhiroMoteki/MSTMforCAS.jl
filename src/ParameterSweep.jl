@@ -66,6 +66,11 @@ end
 
 Generate the Cartesian product grid of complex refractive indices from the
 (min, max, n_grid) ranges for real and imaginary parts.
+
+Uses snake (boustrophedon) ordering: even-indexed m_real rows sweep m_imag
+forward, odd-indexed rows sweep backward. This keeps consecutive grid points
+close in the complex plane, improving continuation (warm-start) quality at
+row boundaries (|Δm| ≈ Δm_real instead of the full m_imag range).
 """
 function _make_ri_grid(config::SweepConfig)::Vector{ComplexF64}
     mr_min, mr_max, mr_n = config.m_real_range
@@ -73,8 +78,17 @@ function _make_ri_grid(config::SweepConfig)::Vector{ComplexF64}
     m_real_vals = mr_n == 1 ? [mr_min] : collect(range(mr_min, mr_max, length=mr_n))
     m_imag_vals = mi_n == 1 ? [mi_min] : collect(range(mi_min, mi_max, length=mi_n))
     grid = ComplexF64[]
-    for mr in m_real_vals, mi in m_imag_vals
-        push!(grid, mr + mi * im)
+    sizehint!(grid, mr_n * mi_n)
+    for (ri, mr) in enumerate(m_real_vals)
+        if iseven(ri)
+            for mi in reverse(m_imag_vals)
+                push!(grid, mr + mi * im)
+            end
+        else
+            for mi in m_imag_vals
+                push!(grid, mr + mi * im)
+            end
+        end
     end
     return grid
 end
