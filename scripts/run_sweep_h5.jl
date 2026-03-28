@@ -5,15 +5,23 @@ Results are written incrementally to HDF5 — safe to interrupt and resume.
 Run with:
   julia --project=. scripts/run_sweep_h5.jl [--fft] [--truncation-order N]
   julia -t auto --project=. scripts/run_sweep_h5.jl [--fft]
+  julia --project=. scripts/run_sweep_h5.jl --gpu
 
 Options:
   --fft                : use FFT-accelerated translation (faster for N > ~100 spheres)
+  --gpu                : use GPU-accelerated batched solver (requires CUDA.jl; implies --fft)
   --truncation-order N : override automatic VSWF truncation order
 """
 
 using MSTMforCAS, Printf
 
-use_fft = "--fft" in ARGS
+use_gpu = "--gpu" in ARGS
+if use_gpu
+    @info "GPU mode requested — loading CUDA.jl..."
+    using CUDA
+end
+
+use_fft = "--fft" in ARGS || use_gpu
 truncation_order = let to = nothing
     for (i, arg) in enumerate(ARGS)
         if arg == "--truncation-order" && i < length(ARGS)
@@ -64,6 +72,7 @@ config = SweepConfig(
     convergence_epsilon = 1e-6,
     use_fft            = use_fft,
     truncation_order   = truncation_order,
+    use_gpu            = use_gpu,
 )
 
 n_mc = length(config.medium_conditions)
@@ -74,7 +83,7 @@ n_jobs = length(aggregates) * n_mc * n_ri
 println("Medium conditions ($n_mc): $(config.medium_conditions)")
 println("RI grid: m_real ∈ [$mr_min, $mr_max] (n=$mr_n) × m_imag ∈ [$mi_min, $mi_max] (n=$mi_n) → $n_ri RI values")
 println("Total jobs: $n_jobs ($(length(aggregates)) aggregates × $n_mc media × $n_ri RIs)")
-println("Threads: $(Threads.nthreads()), use_fft: $use_fft, truncation_order: $(truncation_order === nothing ? "auto" : truncation_order)")
+println("Threads: $(Threads.nthreads()), use_fft: $use_fft, use_gpu: $use_gpu, truncation_order: $(truncation_order === nothing ? "auto" : truncation_order)")
 println()
 
 # ─── Output path ─────────────────────────────────────────────────────────────

@@ -29,6 +29,9 @@ only read from the cache during the sweep. HDF5 writes are serialised via a lock
 
 export run_parameter_sweep, write_results_hdf5, SweepConfig
 
+# GPU dispatch hook — set by the CUDA extension's __init__
+const _gpu_batch_solve_ref = Ref{Union{Function, Nothing}}(nothing)
+
 # CSV, DataFrames, HDF5 already imported by AggregateIO.jl (included earlier)
 
 """
@@ -49,6 +52,8 @@ Configuration for a parameter sweep computation.
 - `convergence_epsilon::Float64`: Solver convergence threshold (default 1e-6)
 - `use_fft::Bool`: Use FFT-accelerated translation (default false)
 - `truncation_order::Union{Int,Nothing}`: Override VSWF truncation order (default nothing = auto)
+- `use_gpu::Bool`: Use GPU-accelerated batched solver via CUDA.jl extension (default false).
+  Requires `using CUDA` before calling `run_parameter_sweep`. Implies `use_fft=true`.
 """
 Base.@kwdef struct SweepConfig
     medium_conditions::Vector{Tuple{Float64,Float64}}
@@ -59,6 +64,7 @@ Base.@kwdef struct SweepConfig
     use_fft::Bool            = false
     truncation_order::Union{Int,Nothing} = nothing
     solver::Symbol           = :cbicg   # :cbicg or :gmres
+    use_gpu::Bool            = false
 end
 
 """
@@ -262,6 +268,14 @@ function run_parameter_sweep(
     n_mrel  = length(ri_grid)
     n_jobs_total = n_agg * n_mc * n_mrel
 
+    # ── GPU availability check ────────────────────────────────────────────────
+    gpu_active = config.use_gpu && _gpu_batch_solve_ref[] !== nothing
+    if config.use_gpu && _gpu_batch_solve_ref[] === nothing
+        @warn "use_gpu=true but CUDA extension not loaded. Run `using CUDA` first. Falling back to CPU."
+    end
+    # GPU implies FFT mode
+    effective_use_fft = config.use_fft || gpu_active
+
     if n_jobs_total == 0
         return nothing
     end
@@ -331,7 +345,7 @@ function run_parameter_sweep(
         m_rel0 = ri_grid[mis0[1]] / n_med0
         compute_scattering(agg0, m_rel0, k0;
             tol=config.convergence_epsilon, max_iter=config.max_iterations,
-            use_fft=config.use_fft, truncation_order=config.truncation_order,
+            use_fft=effective_use_fft, truncation_order=config.truncation_order,
             solver=config.solver)  # returns (ScatteringResult, amn); result discarded
     end
 
@@ -341,7 +355,7 @@ function run_parameter_sweep(
     job_weights = Float64[]
     for (gk, mis) in group_list
         np = Float64(aggregates[gk[1]].n_monomers)
-        w  = config.use_fft ? np : np^2
+        w  = effective_use_fft ? np : np^2
         for _ in mis
             push!(job_weights, w)
         end
@@ -361,8 +375,10 @@ function run_parameter_sweep(
     # ── Sort groups heavy-first for better dynamic load balancing ────────────
     sort!(group_list, by = ((gk, mis),) -> -aggregates[gk[1]].n_monomers)
 
-    # ── Parallel sweep (grouped by geometry+medium for FFT reuse) ────────────
-    Threads.@threads :dynamic for gidx in eachindex(group_list)
+    # ── Sweep (grouped by geometry+medium for FFT reuse) ─────────────────────
+    # GPU mode: sequential outer loop (GPU provides parallelism within each group).
+    # CPU mode: threaded outer loop with dynamic scheduling.
+    _sweep_body! = function (gidx)
         (ai, mci), mi_list = group_list[gidx]
         agg     = aggregates[ai]
         wl, n_med = config.medium_conditions[mci]
@@ -372,7 +388,7 @@ function run_parameter_sweep(
 
         # Precompute FFT grid once per (aggregate, medium_condition) group
         local fft_cache::Union{FFTGridData, Nothing} = nothing
-        if config.use_fft && agg.n_monomers >= 2 && length(mi_list) > 1
+        if effective_use_fft && agg.n_monomers >= 2 && length(mi_list) > 1
             positions_x = agg.positions .* k
             radii_x     = agg.radii     .* k
             local max_noi = 0
@@ -389,28 +405,15 @@ function run_parameter_sweep(
             fft_cache = init_fft_grid(positions_x, radii_x, nois_for_grid)
         end
 
-        # Continuation method: carry previous solution as initial guess
-        local prev_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
-
-        for mi in mi_list
-            m_abs   = ri_grid[mi]
-            m_rel   = m_abs / n_med
-
-            r, amn_out = compute_scattering(agg, m_rel, k;
-                tol=config.convergence_epsilon, max_iter=config.max_iterations,
-                use_fft=config.use_fft, truncation_order=config.truncation_order,
-                precomputed_fft=fft_cache, solver=config.solver,
-                initial_amn=prev_amn)
-            prev_amn = amn_out
-
-            # MI02 amplitudes: S11=S2/(-ik), S22=S1/(-ik), S12=S3/(ik), S21=S4/(ik)
+        # ── Record one result (shared by GPU and CPU paths) ─────────────
+        function _record_one!(r, m_abs::ComplexF64)
             ik = im * k
             S11_fwd = r.S_forward[2] / (-ik);  S22_fwd = r.S_forward[1] / (-ik)
             S12_fwd = r.S_forward[3] / (ik);   S21_fwd = r.S_forward[4] / (ik)
             S11_bwd = r.S_backward[2] / (-ik); S22_bwd = r.S_backward[1] / (-ik)
             S12_bwd = r.S_backward[3] / (ik);  S21_bwd = r.S_backward[4] / (ik)
 
-            local row = (
+            row = (
                 source     = agg.source,
                 mean_rp    = agg.mean_rp,
                 rel_std_rp = agg.rel_std_rp,
@@ -454,7 +457,7 @@ function run_parameter_sweep(
 
             lock(io_lock) do
                 push!(save_buf, row)
-                snapshot_row[] = row   # keep latest for display
+                snapshot_row[] = row
                 now = time()
                 time_since_flush = now - t_last_flush[]
                 should_flush = time_since_flush >= flush_interval || done == n_jobs
@@ -471,7 +474,6 @@ function run_parameter_sweep(
                         100.0 * (done + n_skipped_count) / n_jobs_total,
                         rate)
 
-                    # Snapshot: show last computed result
                     sr = snapshot_row[]
                     if sr !== nothing
                         Ss_fwd = ComplexF64(sr.S11_fwd_re, sr.S11_fwd_im) +
@@ -492,8 +494,47 @@ function run_parameter_sweep(
                     t_last_flush[] = now
                 end
             end
-        end  # for mi
-    end  # @threads for gidx
+        end  # _record_one!
+
+        # ── GPU batch path ────────────────────────────────────────────────
+        if gpu_active
+            ri_batch = [ri_grid[mi] for mi in mi_list]
+            gpu_results = _gpu_batch_solve_ref[](
+                agg, k, ri_batch, n_med, fft_cache,
+                (tol=config.convergence_epsilon, max_iter=config.max_iterations,
+                 truncation_order=config.truncation_order))
+            for (idx, mi) in enumerate(mi_list)
+                r, _amn_out = gpu_results[idx]
+                _record_one!(r, ri_grid[mi])
+            end
+        else
+            # ── CPU sequential path (continuation method) ─────────────────
+            local prev_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
+            for mi in mi_list
+                m_abs   = ri_grid[mi]
+                m_rel   = m_abs / n_med
+                r, amn_out = compute_scattering(agg, m_rel, k;
+                    tol=config.convergence_epsilon, max_iter=config.max_iterations,
+                    use_fft=effective_use_fft, truncation_order=config.truncation_order,
+                    precomputed_fft=fft_cache, solver=config.solver,
+                    initial_amn=prev_amn)
+                prev_amn = amn_out
+                _record_one!(r, m_abs)
+            end
+        end
+    end  # _sweep_body!
+
+    # Dispatch: GPU mode runs sequentially (GPU provides parallelism);
+    # CPU mode uses threaded loop with dynamic scheduling.
+    if gpu_active
+        for gidx in eachindex(group_list)
+            _sweep_body!(gidx)
+        end
+    else
+        Threads.@threads :dynamic for gidx in eachindex(group_list)
+            _sweep_body!(gidx)
+        end
+    end
     println()  # end progress line
 
     return nothing
