@@ -107,6 +107,7 @@ All length inputs (positions, radii, wavelength) must be given in **the same phy
 | `solver` | `Symbol` | Iterative solver: `:cbicg` (default) or `:gmres` | `:gmres` |
 | `use_gpu` | `Bool` | GPU-accelerated batched solver (default `false`; implies `use_fft=true`) | `true` |
 | `gpu_float32` | `Bool` | Use Float32 for GPU BiCG iterations (default `false`; implies `use_gpu=true`) | `true` |
+| `gpu_np_threshold` | `Int` | Hybrid mode threshold: groups with Np ≤ this value are processed by CPU threads concurrently with the GPU task (default `500`; set to `0` to disable hybrid and send all groups to GPU) | `500` |
 
 The sweep covers the full Cartesian product: **aggregates × medium_conditions × m_real × m_imag**.
 
@@ -471,9 +472,13 @@ All timings on a single core (no MPI, no multi-threading). Julia version: 1.11, 
 
 **Memory**: Julia FFT mode uses ~0.5 GB (including ~190 MB for cached near-field translation matrices). For practical CAS parameter sweeps (N ≤ 1000), memory is not a bottleneck.
 
-**Multi-threading**: Parallelization is at the **parameter sweep level**, not within a single aggregate computation. Jobs are grouped by (aggregate, medium_condition), and `Threads.@threads :dynamic` distributes groups across threads with work-stealing load balancing. Groups are sorted by descending monomer count so large aggregates start first. Within each group, all refractive index values share the precomputed FFT grid. Start Julia with `julia -t auto` or `julia -t N`.
+**Multi-threading**: In CPU-only mode, parallelisation is at the **parameter sweep level**: jobs are grouped by (aggregate, medium_condition), and `Threads.@threads :dynamic` distributes groups across threads with work-stealing load balancing. Groups are sorted by descending monomer count so large aggregates start first, improving dynamic load balance. Within each group, all refractive index values share the precomputed FFT grid. Start Julia with `julia -t auto` or `julia -t N`.
 
-This task-level parallelism is far more efficient than parallelizing within a single solver call because: (1) each job is fully independent — zero inter-thread communication and synchronization, giving near-linear scaling; (2) intra-solver parallelism (e.g., threading the O(N²) translation loop) would require synchronization at every BiCG iteration, and Amdahl's law limits the practical speedup to 2–5×. For typical CAS parameter sweeps (thousands of jobs across aggregates, medium conditions, and refractive indices), task-level parallelism with C cores gives ~C× speedup as long as the number of jobs exceeds C.
+In **GPU hybrid mode** (`-t auto --float32` or `--gpu`), two levels of parallelism are active simultaneously:
+1. **Intra-group (Approach A)**: `Threads.@threads` parallelises CPU batch preparation and post-processing within each GPU group, directly reducing GPU idle time.
+2. **Inter-group (Approach B)**: a dedicated GPU task handles large-Np groups sequentially while `Threads.@threads :dynamic` processes small-Np groups (Np ≤ `gpu_np_threshold`) on CPU cores concurrently, so no core sits idle while the GPU is busy.
+
+This task-level parallelism is far more efficient than parallelizing within a single solver call because: (1) each job is fully independent — zero inter-thread communication and synchronization; (2) intra-solver parallelism (e.g., threading the O(N²) translation loop) would require synchronization at every BiCG iteration, and Amdahl's law limits the practical speedup to 2–5×. For typical CAS parameter sweeps (thousands of jobs), task-level parallelism with C cores gives ~C× speedup as long as the number of jobs exceeds C.
 
 **Continuation method for RI sweeps**: When sweeping over refractive indices for the same aggregate geometry, `run_parameter_sweep` automatically uses the previous solution as the initial guess for the iterative solver (continuation method). This reduces the number of CBICG iterations for each subsequent RI grid point. Benchmark results (1000 spheres, FFT mode, $\Delta m \approx 0.05$):
 
@@ -491,17 +496,17 @@ The speedup is most significant for large aggregates where the solver requires m
 
 Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section. HDF5 writes are serialized via a lock.
 
-### GPU-accelerated batched solver (v1.0.1)
+### GPU-accelerated batched solver with hybrid CPU parallelism (v0.3.0)
 
-The GPU solver processes multiple refractive index values simultaneously on a single GPU device, exploiting the fact that the translation operator $\mathbf{A}$ depends only on geometry and is shared across all RI values in a group.
+The GPU solver processes multiple refractive index values simultaneously on a single GPU device, exploiting the fact that the translation operator $\mathbf{A}$ depends only on geometry and is shared across all RI values in a group. A hybrid mode runs CPU threads concurrently with the GPU to maximise hardware utilisation.
 
 ```bash
-# GPU with Float64 precision (A100/H100 recommended)
-# Note: -t auto is not needed — the GPU provides parallelism via batching.
-julia --project=. scripts/run_sweep_h5.jl --gpu
+# GPU+CPU hybrid mode (recommended): GPU for large-Np, CPU threads for small-Np
+# -t auto is required to enable both CPU batch parallelism and the hybrid dispatch
+julia -t auto --project=. scripts/run_sweep_h5.jl --float32
 
-# GPU with Float32 precision (~32× more throughput on consumer GPUs)
-julia --project=. scripts/run_sweep_h5.jl --float32
+# Float64 precision variant
+julia -t auto --project=. scripts/run_sweep_h5.jl --gpu
 ```
 
 Or in Julia:
@@ -514,13 +519,20 @@ config = SweepConfig(
     medium_conditions = [...],
     m_real_range = (...),
     m_imag_range = (...),
-    use_gpu     = true,       # GPU batched solver
-    gpu_float32 = true,       # Float32 BiCG iterations (recommended for consumer GPUs)
+    use_gpu          = true,   # GPU batched solver
+    gpu_float32      = true,   # Float32 BiCG iterations
+    gpu_np_threshold = 500,    # groups with Np ≤ 500 processed by CPU threads (default)
 )
 run_parameter_sweep(aggregates, config; output_h5="results.h5")
 ```
 
-**Architecture**: For each (aggregate, medium) group, the GPU solver: (1) uploads shared geometry data (FFT grid, translation matrices) to GPU once, (2) processes all RI values in batches of B~200 simultaneously, (3) runs batched BiCG with CUDA kernels for T-matrix application, FFT translation, and near-field correction, (4) downloads solutions and post-processes on CPU. A CPU/GPU pipeline overlaps batch k+1 preparation with batch k GPU solve.
+**Architecture**: For each (aggregate, medium) group, the GPU solver: (1) uploads shared geometry data (FFT grid, translation matrices) to GPU once, (2) processes all RI values in batches of B~200 simultaneously using batched BiCG CUDA kernels, (3) downloads solutions and post-processes on CPU.
+
+**Hybrid GPU+CPU dispatch**: With `gpu_np_threshold > 0` (default 500), `run_parameter_sweep` automatically splits groups by monomer count:
+- **GPU task** (separate thread): processes Np > threshold groups sequentially; batch preparation and post-processing are parallelised internally via `Threads.@threads`, so CPU cores contribute to GPU-group throughput even during batch preparation/post-processing.
+- **CPU threads** (`Threads.@threads :dynamic`): process Np ≤ threshold groups in parallel, running *concurrently* with the GPU task so no CPU core sits idle while the GPU is busy.
+
+This design eliminates the GPU-idle bottleneck that arises for large-Np groups where CPU batch preparation and post-processing dominate the wall time: without threading, GPU utilisation was measured at ~0% during the CPU phases.
 
 **Float32 precision**: Mie coefficients and RHS are always computed in Float64 on CPU. Only the BiCG iterations run in Float32 on GPU, with convergence tolerance automatically relaxed to $10^{-5}$. Results are upcast to Float64 for post-processing. Validated on Np=1000 across the full CAS RI sweep range ($m_\mathrm{real} \in [1.55, 2.4]$, $m_\mathrm{imag} \in [0.15, 1.4]$):
 
@@ -533,13 +545,15 @@ run_parameter_sweep(aggregates, config; output_h5="results.h5")
 
 The GPU-FP32 errors are dominated by the FFT translation approximation (same as CPU FFT), not by Float32 rounding.
 
-**Estimated speedup** (RTX A6000, FP32 mode, vs 24-core CPU):
+**Measured throughput** (RTX A6000 + 24-core CPU, FP32 mode, CAS sweep Np=350–2800):
 
-| Optimization level | Speedup | 40-day CPU sweep → |
-| ----- | ----- | ----- |
-| Current implementation | ~12× | ~3.5 days |
-| + Dot product optimization (implemented) | ~19× | ~2 days |
-| + CPU/GPU pipeline (implemented) | ~20–40× | ~1–2 days |
+| Mode | Rate | Full sweep estimate |
+|---|---|---|
+| GPU only, 1 thread (before hybrid) | ~0.8 jobs/s | ~72 days |
+| GPU+CPU hybrid, `-t auto` 24 threads | ~6 jobs/s | ~17 days |
+| Speedup | **~7×** | — |
+
+The bottleneck shifts with Np: for large aggregates (Np≥1000) the threaded batch preparation and post-processing dominate, and GPU utilisation increases significantly with `-t auto`. For small aggregates (Np≤500) CPU-thread parallelism alone is more efficient and runs concurrently with the GPU task.
 
 **Crash recovery**: GPU results are flushed to HDF5 after each batch completes (not after the entire group). Interrupted runs resume correctly.
 
