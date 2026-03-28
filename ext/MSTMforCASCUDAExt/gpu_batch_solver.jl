@@ -268,27 +268,44 @@ function gpu_batch_solve_group(
         upload_batch_mie!(buf, ri_batch, radii_x, n_med, noi_max)
 
         # Build RHS for each RI on CPU, then upload
-        rhs_q1_cpu = zeros(ComplexF64, neqns, batch_size)
-        rhs_q2_cpu = zeros(ComplexF64, neqns, batch_size)
-        rhs_full_cpu = zeros(ComplexF64, neqns, 2, batch_size)
+        # CPU solver does: (1) rhs_inc = phase * p0_i per sphere, (2) T_rhs = T * rhs_inc
+        # BiCG solves (I - T*A)*x = T_rhs. Q_ext uses dot(amn, rhs_inc) (NOT T_rhs).
+        rhs_T_cpu   = zeros(ComplexF64, neqns, 2, batch_size)  # T * rhs_inc (for BiCG)
+        rhs_inc_cpu = zeros(ComplexF64, neqns, 2, batch_size)  # raw rhs_inc (for Q_ext)
 
         for (bi, m_abs) in enumerate(ri_batch)
             m_rel = m_abs / n_med
             mie_vecs = [MSTMforCAS.compute_mie_coefficients(radii_x[s], m_rel; nmax=noi_max) for s in 1:N]
             td_vecs, to_vecs = MSTMforCAS._precompute_T_values(mie_vecs, nois)
 
+            # Step 1: Build incident wave rhs_inc = Σ_i phase_i * p0_i (per sphere)
+            rhs_inc = zeros(ComplexF64, neqns, 2)
+            for i in 1:N
+                off = offsets[i]
+                z_i = positions_x[3, i]
+                phase = exp(im * z_i)
+                p0_i = MSTMforCAS._genplanewavecoef_z0(noi_max)
+                for q in 1:2, p in 1:2
+                    p_blk_off = (p - 1) * hnb_max
+                    for mn in 1:hnb_max
+                        rhs_inc[off + p_blk_off + mn, q] += phase * p0_i[mn, p, q]
+                    end
+                end
+            end
+            rhs_inc_cpu[:, :, bi] .= rhs_inc
+
+            # Step 2: T_rhs = T * rhs_inc (same as CPU Step 6)
             for q in 1:2
-                # RHS = T * p_inc for each sphere
                 for i in 1:N
                     off = offsets[i]
                     for mn in 1:hnb_max
                         n = mn_to_n[mn]
                         td = td_vecs[i][n]
                         to = to_vecs[i][n]
-                        p1 = p0[mn, 1, q]
-                        p2 = p0[mn, 2, q]
-                        rhs_full_cpu[off + mn, q, bi]           = td * p1 + to * p2
-                        rhs_full_cpu[off + hnb_max + mn, q, bi] = to * p1 + td * p2
+                        p1 = rhs_inc[off + mn, q]
+                        p2 = rhs_inc[off + hnb_max + mn, q]
+                        rhs_T_cpu[off + mn, q, bi]           = td * p1 + to * p2
+                        rhs_T_cpu[off + hnb_max + mn, q, bi] = to * p1 + td * p2
                     end
                 end
             end
@@ -302,7 +319,7 @@ function gpu_batch_solve_group(
         for q in 1:2
             # Upload RHS for this polarization — pad to full B if batch_size < B
             rhs_gpu = CUDA.zeros(ComplexF64, neqns, buf.B)
-            copyto!(view(rhs_gpu, :, 1:batch_size), CuArray(rhs_full_cpu[:, q, :]))
+            copyto!(view(rhs_gpu, :, 1:batch_size), CuArray(rhs_T_cpu[:, q, :]))
 
             # Run batched BiCG
             x_gpu, conv, iters = gpu_solve_bicg_batch!(buf, rhs_gpu, gpu_fft, N, tol, max_iter)
@@ -321,7 +338,7 @@ function gpu_batch_solve_group(
         for bi in 1:batch_size
             ri_idx = batch_start + bi - 1
             amn_bi = amn_cpu[:, :, bi]
-            rhs_bi = rhs_full_cpu[:, :, bi]
+            rhs_bi = rhs_inc_cpu[:, :, bi]  # raw incident coefficients (NOT T*rhs)
 
             # Compute ScatteringResult using existing CPU functions
             result = _postprocess_scattering(
