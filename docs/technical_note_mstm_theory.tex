@@ -15,7 +15,7 @@
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-03-28 (corresponds to MSTMforCAS.jl v0.4.1)}
+\date{Last updated: 2026-03-28 (corresponds to MSTMforCAS.jl v1.0.1)}
 
 \begin{document}
 \maketitle
@@ -356,6 +356,15 @@ The \emph{snake-path} (boustrophedon) traversal eliminates this problem by rever
 This ensures that consecutive grid points always differ by either $\Delta m_\mathrm{real}$ or $\Delta m_\mathrm{imag}$ (one intra-row step), never by the full range.
 For the typical CAS sweep grid ($18 \times 26$, $m_\mathrm{real} \in [1.55, 2.4]$, $m_\mathrm{imag} \in [0.15, 1.4]$), the maximum step size drops from $|{\Delta m}| \approx 1.25$ (raster) to $|{\Delta m}| = 0.05$ (snake), a factor of 25 improvement at each of the 17 row boundaries.
 
+\paragraph{GPU-accelerated batched solver.}
+As of v1.0.1, an optional CUDA.jl extension provides GPU-accelerated parameter sweeps.
+For a fixed (aggregate, medium condition) group, the translation operator $\mathbf{A}$ depends only on geometry and is shared across all refractive index values.
+The GPU solver exploits this by processing $B$ RI values simultaneously: it uploads the shared FFT translation data to GPU once, then solves $B$ independent CBICG systems $(\mathbf{I} - \mathbf{T}_b \mathbf{A})\bm{x}_b = \mathbf{T}_b\bm{p}_\mathrm{inc}$ in parallel, where only $\mathbf{T}_b$ (the Mie T-matrix) varies per RI.
+
+A Float32 precision mode is available (\texttt{gpu\_float32=true}): Mie coefficients and the RHS are computed in Float64 on CPU, while the iterative solver runs in ComplexF32 on GPU.
+The convergence tolerance is automatically relaxed to $10^{-5}$.
+Validation against the Fortran reference for $N_S = 1000$ spheres across the full CAS RI range shows that FP32 errors are dominated by the FFT translation approximation, not by the reduced floating-point precision.
+
 \subsection{Incident plane wave coefficients}
 
 For $z$-axis incidence ($\beta = 0$, $\alpha = 0$), only the $m = \pm 1$ multipole components are non-zero due to the azimuthal symmetry of a circularly decomposed plane wave.
@@ -551,6 +560,11 @@ where $S_s^\mathrm{fwd}$ and $S_p^\mathrm{fwd}$ are the forward scattering ampli
   MI02 conversion & \eqref{eq:mi02-conversion} & \texttt{bh83\_to\_mi02} & \texttt{ParameterSweep.jl} \\
   CAS-v2 observables & \eqref{eq:cas-ss}--\eqref{eq:cas-sbak} & \texttt{read\_results\_h5\_for\_cas.jl} & \texttt{scripts/} \\
   Aggregate I/O & --- & \texttt{read\_aggregate\_file}, \texttt{read\_aggregate\_catalog} & \texttt{AggregateIO.jl} \\
+  \midrule
+  \multicolumn{4}{l}{\textit{GPU extension (optional, via \texttt{using CUDA})}} \\
+  GPU batched BiCG & \eqref{eq:global-system}, Table~\ref{tab:cbicg} & \texttt{gpu\_solve\_bicg\_batch!} & \texttt{ext/.../gpu\_batch\_solver.jl} \\
+  GPU FFT translation & \eqref{eq:fft-convolution} & \texttt{gpu\_apply\_A\_batch!} & \texttt{ext/.../gpu\_fft\_translation.jl} \\
+  GPU T-matrix / S-parity & \eqref{eq:tmatrix-lr}, \eqref{eq:adjoint-symmetry} & \texttt{gpu\_apply\_T\_batch!} & \texttt{ext/.../gpu\_kernels.jl} \\
   \bottomrule
 \end{tabular}
 \end{center}

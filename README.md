@@ -61,6 +61,7 @@ Pkg.instantiate()
 | SpecialFunctions.jl | Spherical Bessel functions |
 | FFTW.jl | FFT-accelerated translation |
 | Krylov.jl + LinearOperators.jl | GMRES iterative solver (optional, via `solver=:gmres`) |
+| CUDA.jl | GPU-accelerated batched solver (optional, via `use_gpu=true`) |
 | HDF5.jl | Incremental output storage for large parameter sweeps |
 | CSV.jl + DataFrames.jl | Reading aggregate catalog (input side) |
 | LinearAlgebra (stdlib) | Matrix operations |
@@ -80,6 +81,8 @@ All length inputs (positions, radii, wavelength) must be given in **the same phy
 | `use_fft` | `Bool` | FFT-accelerated translation (default `false`) | `true` |
 | `truncation_order` | `Union{Int,Nothing}` | Override VSWF truncation order (default `nothing` = auto) | `8` |
 | `solver` | `Symbol` | Iterative solver: `:cbicg` (default) or `:gmres` | `:gmres` |
+| `use_gpu` | `Bool` | GPU-accelerated batched solver (default `false`; implies `use_fft=true`) | `true` |
+| `gpu_float32` | `Bool` | Use Float32 for GPU BiCG iterations (default `false`; implies `use_gpu=true`) | `true` |
 
 The sweep covers the full Cartesian product: **aggregates × medium_conditions × m_real × m_imag**.
 
@@ -377,6 +380,12 @@ MSTMforCAS.jl/
 │   ├── ScatteringAmplitude.jl  # Amplitudes + cross sections
 │   ├── AggregateIO.jl         # Read .ptsa/.pos and HDF5+CSV catalog
 │   └── ParameterSweep.jl      # Parallel parameter sweeps
+├── ext/
+│   └── MSTMforCASCUDAExt/     # CUDA.jl extension for GPU batched solver
+│       ├── gpu_types.jl       # GPU data structures and memory management
+│       ├── gpu_kernels.jl     # CUDA kernels (T-matrix, S-parity, BiCG ops)
+│       ├── gpu_fft_translation.jl  # Batched FFT translation operator
+│       └── gpu_batch_solver.jl     # Batched BiCG solver + pipeline
 ├── data/
 │   ├── aggregates/            # HDF5 + CSV from aggregate_generator_PTSA
 │   └── results/               # MSTM computation results (CSV/HDF5)
@@ -457,6 +466,57 @@ The speedup is most significant for large aggregates where the solver requires m
 **Progress and crash recovery**: Results are flushed to HDF5 every ~60 seconds with a result snapshot (CAS amplitudes, Q_ext). Remaining time is estimated from the observed job completion rate, displayed in days. If the process is interrupted, restarting with the same output file automatically resumes from where it left off.
 
 Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section. HDF5 writes are serialized via a lock.
+
+### GPU-accelerated batched solver (v1.0.1)
+
+The GPU solver processes multiple refractive index values simultaneously on a single GPU device, exploiting the fact that the translation operator $\mathbf{A}$ depends only on geometry and is shared across all RI values in a group.
+
+```bash
+# GPU with Float64 precision (A100/H100 recommended)
+julia --project=. scripts/run_sweep_h5.jl --gpu
+
+# GPU with Float32 precision (~32× more throughput on consumer GPUs)
+julia --project=. scripts/run_sweep_h5.jl --float32
+```
+
+Or in Julia:
+
+```julia
+using MSTMforCAS
+using CUDA  # triggers automatic loading of GPU extension
+
+config = SweepConfig(
+    medium_conditions = [...],
+    m_real_range = (...),
+    m_imag_range = (...),
+    use_gpu     = true,       # GPU batched solver
+    gpu_float32 = true,       # Float32 BiCG iterations (recommended for consumer GPUs)
+)
+run_parameter_sweep(aggregates, config; output_h5="results.h5")
+```
+
+**Architecture**: For each (aggregate, medium) group, the GPU solver: (1) uploads shared geometry data (FFT grid, translation matrices) to GPU once, (2) processes all RI values in batches of B~200 simultaneously, (3) runs batched BiCG with CUDA kernels for T-matrix application, FFT translation, and near-field correction, (4) downloads solutions and post-processes on CPU. A CPU/GPU pipeline overlaps batch k+1 preparation with batch k GPU solve.
+
+**Float32 precision**: Mie coefficients and RHS are always computed in Float64 on CPU. Only the BiCG iterations run in Float32 on GPU, with convergence tolerance automatically relaxed to $10^{-5}$. Results are upcast to Float64 for post-processing. Validated on Np=1000 across the full CAS RI sweep range ($m_\mathrm{real} \in [1.55, 2.4]$, $m_\mathrm{imag} \in [0.15, 1.4]$):
+
+| Quantity | GPU-FP64 vs Fortran | GPU-FP32 vs Fortran |
+|---|---|---|
+| $Q_\mathrm{ext}$ | < 0.03% | < 0.03% |
+| $Q_\mathrm{sca}$ | < 0.08% | < 0.08% |
+| $S_1, S_2$ (forward) | < 0.09% | < 0.09% |
+| $S_1, S_2$ (backward) | < 3% | < 3% |
+
+The GPU-FP32 errors are dominated by the FFT translation approximation (same as CPU FFT), not by Float32 rounding.
+
+**Estimated speedup** (RTX A6000, FP32 mode, vs 24-core CPU):
+
+| Optimization level | Speedup | 40-day CPU sweep → |
+| ----- | ----- | ----- |
+| Current implementation | ~12× | ~3.5 days |
+| + Dot product optimization (implemented) | ~19× | ~2 days |
+| + CPU/GPU pipeline (implemented) | ~20–40× | ~1–2 days |
+
+**Crash recovery**: GPU results are flushed to HDF5 after each batch completes (not after the entire group). Interrupted runs resume correctly.
 
 ## Testing
 
