@@ -15,7 +15,7 @@
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-03-28 (corresponds to MSTMforCAS.jl v1.0.2)}
+\date{Last updated: 2026-03-28 (corresponds to MSTMforCAS.jl v0.4.1)}
 
 \begin{document}
 \maketitle
@@ -357,7 +357,7 @@ This ensures that consecutive grid points always differ by either $\Delta m_\mat
 For the typical CAS sweep grid ($18 \times 26$, $m_\mathrm{real} \in [1.55, 2.4]$, $m_\mathrm{imag} \in [0.15, 1.4]$), the maximum step size drops from $|{\Delta m}| \approx 1.25$ (raster) to $|{\Delta m}| = 0.05$ (snake), a factor of 25 improvement at each of the 17 row boundaries.
 
 \paragraph{GPU-accelerated batched solver with hybrid CPU parallelism.}
-As of v0.3.0, an optional CUDA.jl extension provides GPU-accelerated parameter sweeps with hybrid CPU parallelism.
+An optional CUDA.jl extension provides GPU-accelerated parameter sweeps with hybrid CPU parallelism.
 For a fixed (aggregate, medium condition) group, the translation operator $\mathbf{A}$ depends only on geometry and is shared across all refractive index values.
 The GPU solver exploits this by processing $B$ RI values simultaneously: it uploads the shared FFT translation data to GPU once, then solves $B$ independent CBICG systems $(\mathbf{I} - \mathbf{T}_b \mathbf{A})\bm{x}_b = \mathbf{T}_b\bm{p}_\mathrm{inc}$ in parallel, where only $\mathbf{T}_b$ (the Mie T-matrix) varies per RI.
 
@@ -366,7 +366,7 @@ This bottleneck is addressed by three complementary measures:
 \begin{enumerate}
   \item \textbf{Intra-group CPU parallelism}: batch preparation and post-processing are parallelised over the $B$ batch items using \texttt{Threads.@threads}, reducing the CPU-phase time by a factor of $C$ (number of Julia threads).
   \item \textbf{Hybrid GPU+CPU dispatch}: groups with $N_p \leq$ \texttt{gpu\_np\_threshold} (default 500) are processed by CPU threads running \emph{concurrently} with the GPU task via \texttt{Threads.@spawn}, so no CPU core sits idle while the GPU handles a large-aggregate batch.
-  \item \textbf{Batched common-origin translation} (v0.4.0): the common-origin translation matrices $\mathbf{J}_{0i}$ (Eq.~\eqref{eq:common-origin}) depend only on geometry, not on the refractive index.
+  \item \textbf{Batched common-origin translation} (v0.4.1): the common-origin translation matrices $\mathbf{J}_{0i}$ (Eq.~\eqref{eq:common-origin}) depend only on geometry, not on the refractive index.
   They are computed once per group (not once per RI value) and applied to all $B$ solutions simultaneously via a BLAS GEMM: $(\mathbf{J}_{0i}\,\bm{a}^{(i)})_\text{batch} = \mathbf{J}_{0i} \times \bm{A}_\text{batch}$, where $\bm{A}_\text{batch}$ has shape $(N_\text{hnb}, 2B)$.
   This reduces \texttt{compute\_translation\_matrix} calls from $N_S \times n_\text{RI}$ to $N_S$ per group.
 \end{enumerate}

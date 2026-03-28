@@ -496,7 +496,7 @@ The speedup is most significant for large aggregates where the solver requires m
 
 Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section. HDF5 writes are serialized via a lock.
 
-### GPU-accelerated batched solver with hybrid CPU parallelism (v0.4.0)
+### GPU-accelerated batched solver with hybrid CPU parallelism (v0.4.1)
 
 The GPU solver processes multiple refractive index values simultaneously on a single GPU device, exploiting the fact that the translation operator $\mathbf{A}$ depends only on geometry and is shared across all RI values in a group. A hybrid mode runs CPU threads concurrently with the GPU to maximise hardware utilisation.
 
@@ -528,7 +528,7 @@ run_parameter_sweep(aggregates, config; output_h5="results.h5")
 
 **Architecture**: For each (aggregate, medium) group, the GPU solver: (1) uploads shared geometry data (FFT grid, translation matrices) to GPU once, (2) processes all RI values in batches of B simultaneously using batched BiCG CUDA kernels, (3) downloads solutions and post-processes on CPU.
 
-**Post-processing optimisation** (v0.4.0): the common-origin translation matrices $\mathbf{J}_{0i}$ (used to merge per-sphere scattered-field coefficients to a single origin for $Q_\mathrm{sca}$ and S amplitudes) depend only on geometry, not on the refractive index. They are therefore computed once per group and applied to all B RI solutions simultaneously via BLAS GEMM, reducing `compute_translation_matrix` calls from $N \times n_\mathrm{RI}$ to $N$.
+**Post-processing optimisation** (v0.4.1): the common-origin translation matrices $\mathbf{J}_{0i}$ (used to merge per-sphere scattered-field coefficients to a single origin for $Q_\mathrm{sca}$ and S amplitudes) depend only on geometry, not on the refractive index. They are therefore computed once per group and applied to all B RI solutions simultaneously via BLAS GEMM, reducing `compute_translation_matrix` calls from $N \times n_\mathrm{RI}$ to $N$.
 
 **Hybrid GPU+CPU dispatch**: With `gpu_np_threshold > 0` (default 500), `run_parameter_sweep` automatically splits groups by monomer count:
 - **GPU task** (separate thread): processes Np > threshold groups sequentially; batch preparation and post-processing are parallelised internally via `Threads.@threads`, so CPU cores contribute to GPU-group throughput even during batch preparation/post-processing.
