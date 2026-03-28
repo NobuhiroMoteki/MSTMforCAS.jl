@@ -11,14 +11,14 @@ Pipeline: Sphere→Node → FFT convolution → Node→Sphere → Near-field cor
 # Sphere-to-node: scatter sphere coefficients to grid nodes
 # ─────────────────────────────────────────────────────────────
 
-function _sphere_to_node_kernel!(
-    anode,          # (nx, ny, nz, nblk_node, 2, B)
+# Per-sphere staging kernel: write each sphere's contribution to its own slot
+# in a staging buffer (nblk_node, 2, N, B), then scatter-add to grid.
+function _sphere_to_node_stage_kernel!(
+    staging,        # (nblk_node, 2, N, B) — per-sphere output, no race
     inp,            # (neqns, B)
     s2n_H,          # (nblk_node, hnb_max, 2, N)
-    sphere_idx,     # (3, N) grid indices
     hnb_max, nblk_node, N, B
 )
-    # One thread per (kl, b, i) — computes contribution of sphere i to node
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     total = nblk_node * B * N
     if idx > total
@@ -31,25 +31,47 @@ function _sphere_to_node_kernel!(
     b  = rem1 ÷ nblk_node + 1
     kl = rem1 % nblk_node + 1
 
-    ix = sphere_idx[1, i]
-    iy = sphere_idx[2, i]
-    iz = sphere_idx[3, i]
-
     blk = 2 * hnb_max
     off = (i - 1) * blk
 
-    # For each p-mode: accumulate and write (non-atomic for now;
-    # conflicts rare since typically 1-2 spheres per cell)
     for p in Int32(1):Int32(2)
         p_off = (p - 1) * hnb_max
-        acc = zero(ComplexF64)
+        acc = zero(eltype(staging))
         for mn in Int32(1):Int32(hnb_max)
             acc += s2n_H[kl, mn, p, i] * inp[off + p_off + mn, b]
         end
-        # Note: non-atomic write. For cells with multiple spheres, results will
-        # be approximate. A proper implementation would use Float64 atomic adds
-        # on reinterpreted arrays, or a per-sphere staging buffer.
-        anode[ix, iy, iz, kl, p, b] += acc
+        staging[kl, p, i, b] = acc
+    end
+
+    return nothing
+end
+
+# Scatter-add: accumulate per-sphere staging into grid cells (sequential per cell, no race)
+function _sphere_to_node_scatter_kernel!(
+    anode,          # (nx, ny, nz, nblk_node, 2, B)
+    staging,        # (nblk_node, 2, N, B)
+    sphere_idx,     # (3, N)
+    nblk_node, N, B
+)
+    # One thread per (kl, p, b) — loops over all spheres for this output element
+    idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    total = nblk_node * 2 * B
+    if idx > total
+        return nothing
+    end
+
+    idx0 = idx - 1
+    b  = idx0 ÷ (nblk_node * 2) + 1
+    rem1 = idx0 % (nblk_node * 2)
+    p  = rem1 ÷ nblk_node + 1
+    kl = rem1 % nblk_node + 1
+
+    # Accumulate contributions from all spheres
+    for i in Int32(1):Int32(N)
+        ix = sphere_idx[1, i]
+        iy = sphere_idx[2, i]
+        iz = sphere_idx[3, i]
+        anode[ix, iy, iz, kl, p, b] += staging[kl, p, i, b]
     end
 
     return nothing
@@ -59,12 +81,22 @@ function gpu_sphere_to_node_batch!(buf::GPUBatchBuffers, inp, gpu_fft::GPUFFTDat
     buf.anode .= 0
     N = gpu_fft.N
     nblk = gpu_fft.nblk_node
-    total = nblk * buf.B * N
+    CT = eltype(buf.anode)
+
+    # Stage: per-sphere MVP (no race)
+    staging = CUDA.zeros(CT, nblk, 2, N, buf.B)
+    total1 = nblk * buf.B * N
     threads = 256
-    blocks = cld(total, threads)
-    @cuda threads=threads blocks=blocks _sphere_to_node_kernel!(
-        buf.anode, inp, gpu_fft.sphere_node_H, gpu_fft.sphere_node_idx,
+    @cuda threads=threads blocks=cld(total1, threads) _sphere_to_node_stage_kernel!(
+        staging, inp, gpu_fft.sphere_node_H,
         Int32(gpu_fft.hnb_max), Int32(nblk), Int32(N), Int32(buf.B))
+
+    # Scatter: accumulate to grid (one thread per output element, sequential over spheres)
+    total2 = nblk * 2 * buf.B
+    @cuda threads=threads blocks=cld(total2, threads) _sphere_to_node_scatter_kernel!(
+        buf.anode, staging, gpu_fft.sphere_node_idx,
+        Int32(nblk), Int32(N), Int32(buf.B))
+
     return nothing
 end
 
@@ -202,7 +234,9 @@ end
 # Near-field correction: direct Hankel MVP for neighbor pairs
 # ─────────────────────────────────────────────────────────────
 
-function _nearfield_kernel!(
+# Nearfield: sphere-centric approach (no race condition)
+# One thread per (sphere_i, mn_t, b) — loops over all neighbors of sphere i
+function _nearfield_sphere_kernel!(
     out,            # (neqns, B)
     inp,            # (neqns, B)
     nf_ptr,         # (N+1,) CSR row pointers
@@ -211,49 +245,39 @@ function _nearfield_kernel!(
     nf_H_offsets,   # offsets into flat
     hnb_max, N, B
 )
-    # One thread per (mn, b, pair_entry)
-    # Total pair entries = nf_ptr[N+1] - 1
-    n_pairs = nf_ptr[N + 1] - Int32(1)
     idx = (blockIdx().x - 1) * blockDim().x + threadIdx().x
-    total = hnb_max * B * n_pairs
+    total = hnb_max * B * N
     if idx > total
         return nothing
     end
 
     idx0 = idx - 1
-    pair_idx = idx0 ÷ (hnb_max * B) + 1
+    i    = idx0 ÷ (hnb_max * B) + 1
     rem1 = idx0 % (hnb_max * B)
-    b  = rem1 ÷ hnb_max + 1
-    mn_t = rem1 % hnb_max + 1   # target multipole index
-
-    # Find which sphere i this pair belongs to (linear scan — CSR)
-    i = Int32(1)
-    for ii in Int32(1):Int32(N)
-        if pair_idx < nf_ptr[ii + 1]
-            i = ii
-            break
-        end
-    end
-    j = nf_col[pair_idx]
-    h_off = nf_H_offsets[pair_idx]
+    b    = rem1 ÷ hnb_max + 1
+    mn_t = rem1 % hnb_max + 1
 
     blk = 2 * hnb_max
     off_i = (i - 1) * blk
-    off_j = (j - 1) * blk
-    h_stride = hnb_max * hnb_max  # stride for p-mode in flat H
+    h_stride = hnb_max * hnb_max
 
-    for p in Int32(1):Int32(2)
-        p_off_t = (p - 1) * hnb_max
-        p_off_s = (p - 1) * hnb_max
-        h_p_off = (p - 1) * h_stride
+    # Loop over all neighbors of sphere i (sequential — no race on out[i])
+    for pair_idx in nf_ptr[i]:(nf_ptr[i + 1] - Int32(1))
+        j = nf_col[pair_idx]
+        h_off = nf_H_offsets[pair_idx]
+        off_j = (j - 1) * blk
 
-        acc = zero(ComplexF64)
-        for mn_s in Int32(1):Int32(hnb_max)
-            # H[mn_t, mn_s, p] stored column-major: h_off + h_p_off + (mn_s-1)*hnb_max + (mn_t-1)
-            h_idx = h_off + h_p_off + (mn_s - 1) * hnb_max + (mn_t - 1)
-            acc += nf_H_flat[h_idx] * inp[off_j + p_off_s + mn_s, b]
+        for p in Int32(1):Int32(2)
+            p_off = (p - 1) * hnb_max
+            h_p_off = (p - 1) * h_stride
+
+            acc = zero(eltype(out))
+            for mn_s in Int32(1):Int32(hnb_max)
+                h_idx = h_off + h_p_off + (mn_s - 1) * hnb_max + (mn_t - 1)
+                acc += nf_H_flat[h_idx] * inp[off_j + p_off + mn_s, b]
+            end
+            out[off_i + p_off + mn_t, b] += acc
         end
-        out[off_i + p_off_t + mn_t, b] += acc
     end
 
     return nothing
@@ -266,10 +290,10 @@ function gpu_nearfield_batch!(out, inp, buf::GPUBatchBuffers, gpu_fft::GPUFFTDat
     if n_pairs_cpu == 0
         return nothing
     end
-    total = hnb_max * buf.B * n_pairs_cpu
+    total = hnb_max * buf.B * N
     threads = 256
     blocks = cld(total, threads)
-    @cuda threads=threads blocks=blocks _nearfield_kernel!(
+    @cuda threads=threads blocks=blocks _nearfield_sphere_kernel!(
         out, inp, gpu_fft.nearfield_ptr, gpu_fft.nearfield_col,
         gpu_fft.nearfield_H_flat, gpu_fft.nearfield_H_offsets,
         Int32(hnb_max), Int32(N), Int32(buf.B))
