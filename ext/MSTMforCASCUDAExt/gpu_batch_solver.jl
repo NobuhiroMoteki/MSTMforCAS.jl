@@ -195,6 +195,10 @@ Solve scattering for all refractive indices in `ri_values` using GPU batch proce
 Called via the `_gpu_batch_solve_ref[]` dispatch hook from `run_parameter_sweep`.
 
 Returns `Vector{Tuple{ScatteringResult, Matrix{ComplexF64}}}`.
+
+If `params.on_result` is provided, it is called as `on_result(ri_index, result, amn)` for each
+completed RI immediately after its batch finishes. This enables incremental HDF5 flushing and
+crash recovery (results are recorded before the next batch starts).
 """
 function gpu_batch_solve_group(
     agg::MSTMforCAS.AggregateGeometry,
@@ -210,9 +214,10 @@ function gpu_batch_solve_group(
     N = length(radii_x)
     n_ri = length(ri_values)
 
-    use_f32  = get(params, :float32, false)
-    tol      = use_f32 ? max(params.tol, 1e-5) : params.tol  # relax for FP32
-    max_iter = params.max_iter
+    use_f32     = get(params, :float32, false)
+    tol         = use_f32 ? max(params.tol, 1e-5) : params.tol  # relax for FP32
+    max_iter    = params.max_iter
+    on_result   = get(params, :on_result, nothing)  # optional callback(ri_idx, result, amn)
     trunc    = params.truncation_order
 
     # Determine uniform noi_max across all RIs
@@ -335,16 +340,21 @@ function gpu_batch_solve_group(
         return (amn=amn, converged=conv, iters=iters)
     end
 
-    # ── Post-process one batch on CPU ─────────────────────────────────────
+    # ── Post-process one batch on CPU + invoke on_result callback ──────────
     function _postprocess_batch!(results_ref, batch_start_local, prep, sol)
         bs = size(sol.amn, 3)
         for bi in 1:bs
             ri_idx = batch_start_local + bi - 1
+            amn_bi = sol.amn[:, :, bi]
             result = _postprocess_scattering(
-                sol.amn[:, :, bi], prep.rhs_inc[:, :, bi],
+                amn_bi, prep.rhs_inc[:, :, bi],
                 positions_x, radii_x, nois, offsets, half_nblks, noi_max,
                 sol.converged[bi], sol.iters[bi])
-            results_ref[ri_idx] = (result, sol.amn[:, :, bi])
+            results_ref[ri_idx] = (result, amn_bi)
+            # Incremental callback: enables HDF5 flush before next batch
+            if on_result !== nothing
+                on_result(ri_idx, result, amn_bi)
+            end
         end
     end
 

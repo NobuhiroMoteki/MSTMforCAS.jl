@@ -503,15 +503,17 @@ function run_parameter_sweep(
         # ── GPU batch path ────────────────────────────────────────────────
         if gpu_active
             ri_batch = [ri_grid[mi] for mi in mi_list]
-            gpu_results = _gpu_batch_solve_ref[](
+            # Callback: record each result as soon as its batch completes
+            # (enables incremental HDF5 flush and crash recovery)
+            function _on_gpu_result(ri_idx, r, _amn)
+                _record_one!(r, ri_batch[ri_idx])
+            end
+            _gpu_batch_solve_ref[](
                 agg, k, ri_batch, n_med, fft_cache,
                 (tol=config.convergence_epsilon, max_iter=config.max_iterations,
                  truncation_order=config.truncation_order,
-                 float32=config.gpu_float32))
-            for (idx, mi) in enumerate(mi_list)
-                r, _amn_out = gpu_results[idx]
-                _record_one!(r, ri_grid[mi])
-            end
+                 float32=config.gpu_float32,
+                 on_result=_on_gpu_result))
         else
             # ── CPU sequential path (continuation method) ─────────────────
             local prev_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
