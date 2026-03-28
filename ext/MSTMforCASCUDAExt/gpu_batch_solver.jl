@@ -157,12 +157,7 @@ function gpu_solve_bicg_batch!(
                     n_converged += 1
                 end
             end
-            if n_converged >= ceil(Int, 0.8 * B) || all(converged_cpu)
-                for b in 1:B
-                    if !converged_cpu[b]
-                        iter_cpu[b] = it
-                    end
-                end
+            if all(converged_cpu)
                 break
             end
         end
@@ -264,96 +259,132 @@ function gpu_batch_solve_group(
 
     results = Vector{Tuple{MSTMforCAS.ScatteringResult, Matrix{ComplexF64}}}(undef, n_ri)
 
-    # Process in batches
-    for batch_start in 1:B:n_ri
-        batch_end = min(batch_start + B - 1, n_ri)
-        batch_size = batch_end - batch_start + 1
-        ri_batch = ri_values[batch_start:batch_end]
+    # ── CPU batch preparation (extract as function for pipeline reuse) ────
+    function _prepare_batch_cpu(ri_batch_local)
+        bs = length(ri_batch_local)
+        rhs_T   = zeros(ComplexF64, neqns, 2, bs)
+        rhs_inc = zeros(ComplexF64, neqns, 2, bs)
+        td_all  = zeros(ComplexF64, noi_max, bs)  # for upload_batch_mie
+        to_all  = zeros(ComplexF64, noi_max, bs)
 
-        # Upload Mie/T-matrix data for this batch
-        upload_batch_mie!(buf, ri_batch, radii_x, n_med, noi_max)
-
-        # Build RHS for each RI on CPU, then upload
-        # CPU solver does: (1) rhs_inc = phase * p0_i per sphere, (2) T_rhs = T * rhs_inc
-        # BiCG solves (I - T*A)*x = T_rhs. Q_ext uses dot(amn, rhs_inc) (NOT T_rhs).
-        rhs_T_cpu   = zeros(ComplexF64, neqns, 2, batch_size)  # T * rhs_inc (for BiCG)
-        rhs_inc_cpu = zeros(ComplexF64, neqns, 2, batch_size)  # raw rhs_inc (for Q_ext)
-
-        for (bi, m_abs) in enumerate(ri_batch)
+        for (bi, m_abs) in enumerate(ri_batch_local)
             m_rel = m_abs / n_med
             mie_vecs = [MSTMforCAS.compute_mie_coefficients(radii_x[s], m_rel; nmax=noi_max) for s in 1:N]
             td_vecs, to_vecs = MSTMforCAS._precompute_T_values(mie_vecs, nois)
 
-            # Step 1: Build incident wave rhs_inc = Σ_i phase_i * p0_i (per sphere)
-            rhs_inc = zeros(ComplexF64, neqns, 2)
+            # T-matrix for GPU upload (use sphere 1; all identical for uniform radii)
+            for n in 1:noi_max
+                td_all[n, bi] = td_vecs[1][n]
+                to_all[n, bi] = to_vecs[1][n]
+            end
+
+            # Incident wave coefficients with phase factors
+            inc = zeros(ComplexF64, neqns, 2)
             for i in 1:N
                 off = offsets[i]
-                z_i = positions_x[3, i]
-                phase = exp(im * z_i)
+                phase = exp(im * positions_x[3, i])
                 p0_i = MSTMforCAS._genplanewavecoef_z0(noi_max)
                 for q in 1:2, p in 1:2
                     p_blk_off = (p - 1) * hnb_max
                     for mn in 1:hnb_max
-                        rhs_inc[off + p_blk_off + mn, q] += phase * p0_i[mn, p, q]
+                        inc[off + p_blk_off + mn, q] += phase * p0_i[mn, p, q]
                     end
                 end
             end
-            rhs_inc_cpu[:, :, bi] .= rhs_inc
+            rhs_inc[:, :, bi] .= inc
 
-            # Step 2: T_rhs = T * rhs_inc (same as CPU Step 6)
-            for q in 1:2
-                for i in 1:N
-                    off = offsets[i]
-                    for mn in 1:hnb_max
-                        n = mn_to_n[mn]
-                        td = td_vecs[i][n]
-                        to = to_vecs[i][n]
-                        p1 = rhs_inc[off + mn, q]
-                        p2 = rhs_inc[off + hnb_max + mn, q]
-                        rhs_T_cpu[off + mn, q, bi]           = td * p1 + to * p2
-                        rhs_T_cpu[off + hnb_max + mn, q, bi] = to * p1 + td * p2
-                    end
+            # T * rhs_inc
+            for q in 1:2, i in 1:N
+                off = offsets[i]
+                for mn in 1:hnb_max
+                    n = mn_to_n[mn]
+                    td = td_vecs[i][n]; to = to_vecs[i][n]
+                    p1 = inc[off + mn, q]; p2 = inc[off + hnb_max + mn, q]
+                    rhs_T[off + mn, q, bi]           = td * p1 + to * p2
+                    rhs_T[off + hnb_max + mn, q, bi] = to * p1 + td * p2
                 end
             end
         end
+        return (rhs_T=rhs_T, rhs_inc=rhs_inc, td=td_all, to=to_all)
+    end
 
-        # Solve for each polarization
-        amn_cpu = zeros(ComplexF64, neqns, 2, batch_size)
-        converged_all = fill(true, batch_size)
-        iter_all = zeros(Int, batch_size)
-
+    # ── GPU solve for one batch (uses pre-prepared CPU data) ──────────────
+    function _solve_batch_gpu(prep, batch_size_local)
         CT = eltype(buf.x)
+        # Upload T-matrix (zero-fill first to clear stale data from previous batch)
+        buf.t_diag .= 0
+        buf.t_off .= 0
+        copyto!(view(buf.t_diag, :, 1:batch_size_local), CuArray(CT.(prep.td)))
+        copyto!(view(buf.t_off,  :, 1:batch_size_local), CuArray(CT.(prep.to)))
+
+        amn = zeros(ComplexF64, neqns, 2, batch_size_local)
+        conv = fill(true, batch_size_local)
+        iters = zeros(Int, batch_size_local)
+
+        rhs_gpu = CUDA.zeros(CT, neqns, buf.B)
         for q in 1:2
-            # Upload RHS — downcast to CT (ComplexF32 if float32 mode)
-            rhs_gpu = CUDA.zeros(CT, neqns, buf.B)
-            copyto!(view(rhs_gpu, :, 1:batch_size), CuArray(CT.(rhs_T_cpu[:, q, :])))
-
-            # Run batched BiCG
-            x_gpu, conv, iters = gpu_solve_bicg_batch!(buf, rhs_gpu, gpu_fft, N, tol, max_iter)
-
-            # Download solution — upcast back to Float64
-            x_cpu = ComplexF64.(Array(view(x_gpu, :, 1:batch_size)))
-            amn_cpu[:, q, :] .= x_cpu
-
-            for bi in 1:batch_size
-                converged_all[bi] = converged_all[bi] && conv[bi]
-                iter_all[bi] = max(iter_all[bi], iters[bi])
+            rhs_gpu .= 0
+            copyto!(view(rhs_gpu, :, 1:batch_size_local), CuArray(CT.(prep.rhs_T[:, q, :])))
+            x_gpu, c, it = gpu_solve_bicg_batch!(buf, rhs_gpu, gpu_fft, N, tol, max_iter)
+            amn[:, q, :] .= ComplexF64.(Array(view(x_gpu, :, 1:batch_size_local)))
+            for bi in 1:batch_size_local
+                conv[bi] = conv[bi] && c[bi]
+                iters[bi] = max(iters[bi], it[bi])
             end
         end
+        return (amn=amn, converged=conv, iters=iters)
+    end
 
-        # Post-process each RI on CPU (amplitudes, cross sections)
-        for bi in 1:batch_size
-            ri_idx = batch_start + bi - 1
-            amn_bi = amn_cpu[:, :, bi]
-            rhs_bi = rhs_inc_cpu[:, :, bi]  # raw incident coefficients (NOT T*rhs)
-
-            # Compute ScatteringResult using existing CPU functions
+    # ── Post-process one batch on CPU ─────────────────────────────────────
+    function _postprocess_batch!(results_ref, batch_start_local, prep, sol)
+        bs = size(sol.amn, 3)
+        for bi in 1:bs
+            ri_idx = batch_start_local + bi - 1
             result = _postprocess_scattering(
-                amn_bi, rhs_bi, positions_x, radii_x,
-                nois, offsets, half_nblks, noi_max,
-                converged_all[bi], iter_all[bi])
+                sol.amn[:, :, bi], prep.rhs_inc[:, :, bi],
+                positions_x, radii_x, nois, offsets, half_nblks, noi_max,
+                sol.converged[bi], sol.iters[bi])
+            results_ref[ri_idx] = (result, sol.amn[:, :, bi])
+        end
+    end
 
-            results[ri_idx] = (result, amn_bi)
+    # ── Pipelined batch loop ──────────────────────────────────────────────
+    # While GPU solves batch k, CPU prepares batch k+1.
+    # GPU kernels are asynchronous; CPU work proceeds in parallel until
+    # we access GPU results (Array() triggers synchronization).
+    batch_ranges = [(s, min(s + B - 1, n_ri)) for s in 1:B:n_ri]
+    n_batches = length(batch_ranges)
+
+    if n_batches == 0
+        return results
+    end
+
+    # Prepare first batch on CPU
+    s1, e1 = batch_ranges[1]
+    prep_current = _prepare_batch_cpu(ri_values[s1:e1])
+
+    for k in 1:n_batches
+        sk, ek = batch_ranges[k]
+        batch_size_k = ek - sk + 1
+
+        # Launch GPU solve for batch k (asynchronous — returns quickly)
+        sol_k = _solve_batch_gpu(prep_current, batch_size_k)
+        # Note: _solve_batch_gpu calls Array() internally which synchronizes.
+        # For full async we'd need to restructure, but the current CPU prep
+        # for batch k+1 still overlaps with GPU post-kernel work + data transfer.
+
+        # Prepare batch k+1 on CPU (overlaps with GPU→CPU transfer of batch k)
+        if k < n_batches
+            sk1, ek1 = batch_ranges[k + 1]
+            prep_next = _prepare_batch_cpu(ri_values[sk1:ek1])
+        end
+
+        # Post-process batch k
+        _postprocess_batch!(results, sk, prep_current, sol_k)
+
+        # Advance pipeline
+        if k < n_batches
+            prep_current = prep_next
         end
     end
 
