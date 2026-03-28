@@ -256,28 +256,20 @@ end
 
 # ─────────────────────────────────────────────────────────────
 # Batched dot products: out[b] = sum(conj(a[:,b]) .* b_arr[:,b])
-# Uses cuBLAS zdotc for each batch element (simple, sufficient for B~100)
+# Uses fused broadcast + column reduction (2 kernel launches, no CPU round-trip)
 # ─────────────────────────────────────────────────────────────
 
 function gpu_batch_dot!(out::CuVector{CT}, a::CuMatrix{CT},
                         b_arr::CuMatrix{CT}, neqns::Int, B::Int) where CT<:Complex
-    out_cpu = Vector{CT}(undef, B)
-    for bi in 1:B
-        a_col = a[:, bi]
-        b_col = b_arr[:, bi]
-        out_cpu[bi] = CT(dot(a_col, b_col))  # LinearAlgebra.dot: Hermitian
-    end
-    copyto!(out, CuArray(out_cpu))
+    # Fused broadcast conj(a).*b → (neqns, B), then sum along dim 1 → (1, B)
+    # CUDA.jl memory pool recycles the temporary after first call.
+    out .= vec(sum(conj.(a) .* b_arr; dims=1))
     return nothing
 end
 
 function gpu_batch_real_dot!(out::CuVector{RT}, a::CuMatrix{<:Complex},
                              neqns::Int, B::Int) where RT<:AbstractFloat
-    out_cpu = Vector{RT}(undef, B)
-    for bi in 1:B
-        v = a[:, bi]
-        out_cpu[bi] = RT(real(dot(v, v)))
-    end
-    copyto!(out, CuArray(out_cpu))
+    # sum(|a|²) along dim 1 — fused broadcast + reduction
+    out .= vec(sum(abs2.(a); dims=1))
     return nothing
 end

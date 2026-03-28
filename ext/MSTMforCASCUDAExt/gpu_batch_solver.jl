@@ -94,14 +94,23 @@ function gpu_solve_bicg_batch!(
         return (copy(buf.x), converged_cpu, iter_cpu)
     end
 
-    # Allocate CPU-side scalar buffers
+    # Pre-allocate scalar buffers (reused across iterations — no per-iteration alloc)
     CT = eltype(buf.x)
     RT = real(CT)
     alpha_cpu = Vector{CT}(undef, B)
     beta_cpu  = Vector{CT}(undef, B)
     sk_cpu    = Array(buf.sk)
 
+    # GPU scalar buffers (pre-allocated, reused)
+    denom_gpu = CUDA.zeros(CT, B)
+    sk2_gpu   = CUDA.zeros(CT, B)
+    alpha_gpu = CUDA.zeros(CT, B)
+    beta_gpu  = CUDA.zeros(CT, B)
+
     convergence_check_interval = 5
+    total_elem = neqns * B
+    threads = 256
+    blocks = cld(total_elem, threads)
 
     for it in 1:max_iter
         # cap = L(pv), caw = L*(w)
@@ -109,30 +118,25 @@ function gpu_solve_bicg_batch!(
         gpu_apply_Lstar_batch!(buf.caw, buf.w, buf, gpu_fft, N)
 
         # denom[b] = dot(w[:,b], cap[:,b])
-        denom_buf = CUDA.zeros(CT, B)
-        gpu_batch_dot!(denom_buf, buf.w, buf.cap, neqns, B)
-        denom_cpu = Array(denom_buf)
+        gpu_batch_dot!(denom_gpu, buf.w, buf.cap, neqns, B)
+        denom_cpu = Array(denom_gpu)
 
         # alpha = sk / denom
         for b in 1:B
             if !converged_cpu[b]
-                alpha_cpu[b] = abs(denom_cpu[b]) > 1e-300 ? sk_cpu[b] / denom_cpu[b] : zero(ComplexF64)
+                alpha_cpu[b] = abs(denom_cpu[b]) > 1e-300 ? sk_cpu[b] / denom_cpu[b] : zero(CT)
             else
-                alpha_cpu[b] = zero(ComplexF64)
+                alpha_cpu[b] = zero(CT)
             end
         end
-        alpha_gpu = CuArray(alpha_cpu)
+        copyto!(alpha_gpu, CuArray(alpha_cpu))
 
         # x += alpha * pv, r -= alpha * cap, q -= conj(alpha) * caw
-        total = neqns * B
-        threads = 256
-        blocks = cld(total, threads)
         @cuda threads=threads blocks=blocks _bicg_update_xrq_kernel!(
             buf.x, buf.r, buf.q, buf.pv, buf.cap, buf.caw, alpha_gpu,
             Int32(neqns), Int32(B))
 
         # sk2[b] = dot(q[:,b], r[:,b])
-        sk2_gpu = CUDA.zeros(CT, B)
         gpu_batch_dot!(sk2_gpu, buf.q, buf.r, neqns, B)
         sk2_cpu = Array(sk2_gpu)
 
@@ -143,7 +147,7 @@ function gpu_solve_bicg_batch!(
             n_converged = 0
             for b in 1:B
                 if !converged_cpu[b]
-                    rel_err = err_cpu[b] / max(norm2_cpu[b], 1e-300)
+                    rel_err = err_cpu[b] / max(norm2_cpu[b], RT(1e-300))
                     if rel_err < tol
                         converged_cpu[b] = true
                         iter_cpu[b] = it
@@ -153,9 +157,7 @@ function gpu_solve_bicg_batch!(
                     n_converged += 1
                 end
             end
-            # Early exit if >= 80% converged
             if n_converged >= ceil(Int, 0.8 * B) || all(converged_cpu)
-                # Mark remaining as done at max iterations
                 for b in 1:B
                     if !converged_cpu[b]
                         iter_cpu[b] = it
@@ -167,10 +169,10 @@ function gpu_solve_bicg_batch!(
 
         # beta = sk2 / sk, update search directions
         for b in 1:B
-            beta_cpu[b] = abs(sk_cpu[b]) > 1e-300 ? sk2_cpu[b] / sk_cpu[b] : zero(ComplexF64)
+            beta_cpu[b] = abs(sk_cpu[b]) > 1e-300 ? sk2_cpu[b] / sk_cpu[b] : zero(CT)
             sk_cpu[b] = sk2_cpu[b]
         end
-        beta_gpu = CuArray(beta_cpu)
+        copyto!(beta_gpu, CuArray(beta_cpu))
 
         @cuda threads=threads blocks=blocks _bicg_update_pw_kernel!(
             buf.pv, buf.w, buf.r, buf.q, beta_gpu,
