@@ -259,24 +259,24 @@ end
 # Uses cuBLAS zdotc for each batch element (simple, sufficient for B~100)
 # ─────────────────────────────────────────────────────────────
 
-function gpu_batch_dot!(out::CuVector{ComplexF64}, a::CuMatrix{ComplexF64},
-                        b_arr::CuMatrix{ComplexF64}, neqns::Int, B::Int)
-    out_cpu = Vector{ComplexF64}(undef, B)
+function gpu_batch_dot!(out::CuVector{CT}, a::CuMatrix{CT},
+                        b_arr::CuMatrix{CT}, neqns::Int, B::Int) where CT<:Complex
+    out_cpu = Vector{CT}(undef, B)
     for bi in 1:B
         a_col = a[:, bi]
         b_col = b_arr[:, bi]
-        out_cpu[bi] = dot(a_col, b_col)  # LinearAlgebra.dot: Hermitian
+        out_cpu[bi] = CT(dot(a_col, b_col))  # LinearAlgebra.dot: Hermitian
     end
     copyto!(out, CuArray(out_cpu))
     return nothing
 end
 
-function gpu_batch_real_dot!(out::CuVector{Float64}, a::CuMatrix{ComplexF64},
-                             neqns::Int, B::Int)
-    out_cpu = Vector{Float64}(undef, B)
+function gpu_batch_real_dot!(out::CuVector{RT}, a::CuMatrix{<:Complex},
+                             neqns::Int, B::Int) where RT<:AbstractFloat
+    out_cpu = Vector{RT}(undef, B)
     for bi in 1:B
         v = a[:, bi]
-        out_cpu[bi] = real(dot(v, v))
+        out_cpu[bi] = RT(real(dot(v, v)))
     end
     copyto!(out, CuArray(out_cpu))
     return nothing

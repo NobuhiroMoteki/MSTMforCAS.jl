@@ -54,6 +54,9 @@ Configuration for a parameter sweep computation.
 - `truncation_order::Union{Int,Nothing}`: Override VSWF truncation order (default nothing = auto)
 - `use_gpu::Bool`: Use GPU-accelerated batched solver via CUDA.jl extension (default false).
   Requires `using CUDA` before calling `run_parameter_sweep`. Implies `use_fft=true`.
+- `gpu_float32::Bool`: Use Float32 precision for GPU BiCG iterations (default false).
+  Mie coefficients and post-processing remain Float64. ~32x faster than Float64 on consumer GPUs.
+  Convergence tolerance is automatically relaxed to max(tol, 1e-5) for Float32 mode.
 """
 Base.@kwdef struct SweepConfig
     medium_conditions::Vector{Tuple{Float64,Float64}}
@@ -65,6 +68,7 @@ Base.@kwdef struct SweepConfig
     truncation_order::Union{Int,Nothing} = nothing
     solver::Symbol           = :cbicg   # :cbicg or :gmres
     use_gpu::Bool            = false
+    gpu_float32::Bool        = false
 end
 
 """
@@ -502,7 +506,8 @@ function run_parameter_sweep(
             gpu_results = _gpu_batch_solve_ref[](
                 agg, k, ri_batch, n_med, fft_cache,
                 (tol=config.convergence_epsilon, max_iter=config.max_iterations,
-                 truncation_order=config.truncation_order))
+                 truncation_order=config.truncation_order,
+                 float32=config.gpu_float32))
             for (idx, mi) in enumerate(mi_list)
                 r, _amn_out = gpu_results[idx]
                 _record_one!(r, ri_grid[mi])

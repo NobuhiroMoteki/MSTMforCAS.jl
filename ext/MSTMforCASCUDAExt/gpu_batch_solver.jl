@@ -53,12 +53,12 @@ end
 
 function gpu_solve_bicg_batch!(
     buf::GPUBatchBuffers,
-    rhs::CuMatrix{ComplexF64},    # (neqns, B) — right-hand side T*p_inc
+    rhs::CuMatrix,    # (neqns, B) — right-hand side T*p_inc (CT element type)
     gpu_fft::GPUFFTData,
     N::Int,
     tol::Float64,
     max_iter::Int
-)::Tuple{CuMatrix{ComplexF64}, Vector{Bool}, Vector{Int}}
+)
 
     neqns = buf.neqns
     B = buf.B
@@ -95,8 +95,10 @@ function gpu_solve_bicg_batch!(
     end
 
     # Allocate CPU-side scalar buffers
-    alpha_cpu = Vector{ComplexF64}(undef, B)
-    beta_cpu  = Vector{ComplexF64}(undef, B)
+    CT = eltype(buf.x)
+    RT = real(CT)
+    alpha_cpu = Vector{CT}(undef, B)
+    beta_cpu  = Vector{CT}(undef, B)
     sk_cpu    = Array(buf.sk)
 
     convergence_check_interval = 5
@@ -107,7 +109,7 @@ function gpu_solve_bicg_batch!(
         gpu_apply_Lstar_batch!(buf.caw, buf.w, buf, gpu_fft, N)
 
         # denom[b] = dot(w[:,b], cap[:,b])
-        denom_buf = CUDA.zeros(ComplexF64, B)
+        denom_buf = CUDA.zeros(CT, B)
         gpu_batch_dot!(denom_buf, buf.w, buf.cap, neqns, B)
         denom_cpu = Array(denom_buf)
 
@@ -130,7 +132,7 @@ function gpu_solve_bicg_batch!(
             Int32(neqns), Int32(B))
 
         # sk2[b] = dot(q[:,b], r[:,b])
-        sk2_gpu = CUDA.zeros(ComplexF64, B)
+        sk2_gpu = CUDA.zeros(CT, B)
         gpu_batch_dot!(sk2_gpu, buf.q, buf.r, neqns, B)
         sk2_cpu = Array(sk2_gpu)
 
@@ -211,7 +213,8 @@ function gpu_batch_solve_group(
     N = length(radii_x)
     n_ri = length(ri_values)
 
-    tol      = params.tol
+    use_f32  = get(params, :float32, false)
+    tol      = use_f32 ? max(params.tol, 1e-5) : params.tol  # relax for FP32
     max_iter = params.max_iter
     trunc    = params.truncation_order
 
@@ -241,10 +244,11 @@ function gpu_batch_solve_group(
 
     # Determine batch size
     B = determine_batch_size(neqns, gpu_fft, n_ri)
-    @info "GPU batch solver" N=N noi_max=noi_max neqns=neqns n_ri=n_ri batch_size=B
+    prec_str = use_f32 ? "Float32" : "Float64"
+    @info "GPU batch solver" N=N noi_max=noi_max neqns=neqns n_ri=n_ri batch_size=B precision=prec_str tol=tol
 
     # Allocate batch buffers
-    buf = allocate_batch_buffers(neqns, B, noi_max, gpu_fft)
+    buf = allocate_batch_buffers(neqns, B, noi_max, gpu_fft; float32=use_f32)
 
     # Build uniform offsets (all spheres same noi_max)
     blk_size = 2 * hnb_max
@@ -316,16 +320,17 @@ function gpu_batch_solve_group(
         converged_all = fill(true, batch_size)
         iter_all = zeros(Int, batch_size)
 
+        CT = eltype(buf.x)
         for q in 1:2
-            # Upload RHS for this polarization — pad to full B if batch_size < B
-            rhs_gpu = CUDA.zeros(ComplexF64, neqns, buf.B)
-            copyto!(view(rhs_gpu, :, 1:batch_size), CuArray(rhs_T_cpu[:, q, :]))
+            # Upload RHS — downcast to CT (ComplexF32 if float32 mode)
+            rhs_gpu = CUDA.zeros(CT, neqns, buf.B)
+            copyto!(view(rhs_gpu, :, 1:batch_size), CuArray(CT.(rhs_T_cpu[:, q, :])))
 
             # Run batched BiCG
             x_gpu, conv, iters = gpu_solve_bicg_batch!(buf, rhs_gpu, gpu_fft, N, tol, max_iter)
 
-            # Download solution
-            x_cpu = Array(view(x_gpu, :, 1:batch_size))
+            # Download solution — upcast back to Float64
+            x_cpu = ComplexF64.(Array(view(x_gpu, :, 1:batch_size)))
             amn_cpu[:, q, :] .= x_cpu
 
             for bi in 1:batch_size

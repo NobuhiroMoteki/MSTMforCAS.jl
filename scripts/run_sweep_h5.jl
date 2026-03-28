@@ -10,12 +10,14 @@ Run with:
 Options:
   --fft                : use FFT-accelerated translation (faster for N > ~100 spheres)
   --gpu                : use GPU-accelerated batched solver (requires CUDA.jl; implies --fft)
+  --float32            : use Float32 precision for GPU BiCG (implies --gpu; ~32x faster on consumer GPUs)
   --truncation-order N : override automatic VSWF truncation order
 """
 
 using MSTMforCAS, Printf
 
-use_gpu = "--gpu" in ARGS
+gpu_float32 = "--float32" in ARGS
+use_gpu = "--gpu" in ARGS || gpu_float32
 if use_gpu
     @info "GPU mode requested — loading CUDA.jl..."
     using CUDA
@@ -73,6 +75,7 @@ config = SweepConfig(
     use_fft            = use_fft,
     truncation_order   = truncation_order,
     use_gpu            = use_gpu,
+    gpu_float32        = gpu_float32,
 )
 
 n_mc = length(config.medium_conditions)
@@ -83,7 +86,7 @@ n_jobs = length(aggregates) * n_mc * n_ri
 println("Medium conditions ($n_mc): $(config.medium_conditions)")
 println("RI grid: m_real ∈ [$mr_min, $mr_max] (n=$mr_n) × m_imag ∈ [$mi_min, $mi_max] (n=$mi_n) → $n_ri RI values")
 println("Total jobs: $n_jobs ($(length(aggregates)) aggregates × $n_mc media × $n_ri RIs)")
-println("Threads: $(Threads.nthreads()), use_fft: $use_fft, use_gpu: $use_gpu, truncation_order: $(truncation_order === nothing ? "auto" : truncation_order)")
+println("Threads: $(Threads.nthreads()), use_fft: $use_fft, use_gpu: $use_gpu, gpu_float32: $gpu_float32, truncation_order: $(truncation_order === nothing ? "auto" : truncation_order)")
 println()
 
 # ─── Output path ─────────────────────────────────────────────────────────────

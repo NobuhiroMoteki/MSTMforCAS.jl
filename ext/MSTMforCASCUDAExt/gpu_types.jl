@@ -39,47 +39,45 @@ end
 # Batch buffers — pre-allocated for B simultaneous BiCG solves
 # ─────────────────────────────────────────────────────────────
 
-struct GPUBatchBuffers
+struct GPUBatchBuffers{CT<:Complex, RT<:AbstractFloat}
     B       ::Int
     neqns   ::Int
     noi_max ::Int
 
-    # BiCG state vectors: (neqns, B) each
-    x       ::CuMatrix{ComplexF64}
-    r       ::CuMatrix{ComplexF64}
-    q       ::CuMatrix{ComplexF64}
-    pv      ::CuMatrix{ComplexF64}
-    w       ::CuMatrix{ComplexF64}
-    cap     ::CuMatrix{ComplexF64}
-    caw     ::CuMatrix{ComplexF64}
-    tmp_A   ::CuMatrix{ComplexF64}
-    tmp_T   ::CuMatrix{ComplexF64}
+    # BiCG state vectors: (neqns, B) each — CT = ComplexF64 or ComplexF32
+    x       ::CuMatrix{CT}
+    r       ::CuMatrix{CT}
+    q       ::CuMatrix{CT}
+    pv      ::CuMatrix{CT}
+    w       ::CuMatrix{CT}
+    cap     ::CuMatrix{CT}
+    caw     ::CuMatrix{CT}
+    tmp_A   ::CuMatrix{CT}
+    tmp_T   ::CuMatrix{CT}
 
     # Adjoint temporaries
-    conj_buf ::CuMatrix{ComplexF64}
+    conj_buf ::CuMatrix{CT}
 
     # Per-RI scalars: (B,)
-    sk      ::CuVector{ComplexF64}
-    norm2_p ::CuVector{Float64}
-    err     ::CuVector{Float64}
+    sk      ::CuVector{CT}
+    norm2_p ::CuVector{RT}
+    err     ::CuVector{RT}
     converged ::CuVector{Int32}
 
-    # T-matrix per RI: (noi_max, B)
-    t_diag  ::CuMatrix{ComplexF64}
-    t_off   ::CuMatrix{ComplexF64}
+    # T-matrix per RI: (noi_max, B) — always CT (downcast from FP64 if float32 mode)
+    t_diag  ::CuMatrix{CT}
+    t_off   ::CuMatrix{CT}
 
     # mn→n lookup: (hnb_max,) shared across B
     mn_to_n ::CuVector{Int32}
 
-    # FFT work buffers
-    # anode/gnode: (nx, ny, nz, nblk_node, 2, B)
-    anode   ::CuArray{ComplexF64, 6}
-    gnode   ::CuArray{ComplexF64, 6}
-    # Zero-padded FFT buffers: (2nx, 2ny, 2nz, nblk_node, B)
-    aft     ::CuArray{ComplexF64, 5}
-    gft     ::CuArray{ComplexF64, 5}
+    # FFT work buffers — CT
+    anode   ::CuArray{CT, 6}
+    gnode   ::CuArray{CT, 6}
+    aft     ::CuArray{CT, 5}
+    gft     ::CuArray{CT, 5}
 
-    # cuFFT plans (for nblk_node * B batched 3D transforms)
+    # cuFFT plans
     fft_plan  ::Any
     ifft_plan ::Any
 end
@@ -160,33 +158,36 @@ function allocate_batch_buffers(
     neqns::Int,
     B::Int,
     noi_max::Int,
-    gpu_fft::GPUFFTData
-)::GPUBatchBuffers
+    gpu_fft::GPUFFTData;
+    float32::Bool = false
+)
+    CT = float32 ? ComplexF32 : ComplexF64
+    RT = float32 ? Float32 : Float64
     hnb_max   = noi_max * (noi_max + 2)
     nblk_node = gpu_fft.nblk_node
     nx, ny, nz = gpu_fft.cell_dim
 
     # BiCG vectors
-    x       = CUDA.zeros(ComplexF64, neqns, B)
-    r       = CUDA.zeros(ComplexF64, neqns, B)
-    q       = CUDA.zeros(ComplexF64, neqns, B)
-    pv      = CUDA.zeros(ComplexF64, neqns, B)
-    w       = CUDA.zeros(ComplexF64, neqns, B)
-    cap     = CUDA.zeros(ComplexF64, neqns, B)
-    caw     = CUDA.zeros(ComplexF64, neqns, B)
-    tmp_A   = CUDA.zeros(ComplexF64, neqns, B)
-    tmp_T   = CUDA.zeros(ComplexF64, neqns, B)
-    conj_buf = CUDA.zeros(ComplexF64, neqns, B)
+    x       = CUDA.zeros(CT, neqns, B)
+    r       = CUDA.zeros(CT, neqns, B)
+    q       = CUDA.zeros(CT, neqns, B)
+    pv      = CUDA.zeros(CT, neqns, B)
+    w       = CUDA.zeros(CT, neqns, B)
+    cap     = CUDA.zeros(CT, neqns, B)
+    caw     = CUDA.zeros(CT, neqns, B)
+    tmp_A   = CUDA.zeros(CT, neqns, B)
+    tmp_T   = CUDA.zeros(CT, neqns, B)
+    conj_buf = CUDA.zeros(CT, neqns, B)
 
     # Per-RI scalars
-    sk      = CUDA.zeros(ComplexF64, B)
-    norm2_p = CUDA.zeros(Float64, B)
-    err     = CUDA.zeros(Float64, B)
+    sk      = CUDA.zeros(CT, B)
+    norm2_p = CUDA.zeros(RT, B)
+    err     = CUDA.zeros(RT, B)
     converged = CUDA.zeros(Int32, B)
 
-    # T-matrix
-    t_diag  = CUDA.zeros(ComplexF64, noi_max, B)
-    t_off   = CUDA.zeros(ComplexF64, noi_max, B)
+    # T-matrix (will be downcast from FP64 at upload time)
+    t_diag  = CUDA.zeros(CT, noi_max, B)
+    t_off   = CUDA.zeros(CT, noi_max, B)
 
     # mn→n lookup
     mn_to_n_cpu = Vector{Int32}(undef, hnb_max)
@@ -199,12 +200,12 @@ function allocate_batch_buffers(
     mn_to_n = CuArray(mn_to_n_cpu)
 
     # FFT work buffers
-    anode = CUDA.zeros(ComplexF64, nx, ny, nz, nblk_node, 2, B)
-    gnode = CUDA.zeros(ComplexF64, nx, ny, nz, nblk_node, 2, B)
-    aft   = CUDA.zeros(ComplexF64, 2nx, 2ny, 2nz, nblk_node, B)
-    gft   = CUDA.zeros(ComplexF64, 2nx, 2ny, 2nz, nblk_node, B)
+    anode = CUDA.zeros(CT, nx, ny, nz, nblk_node, 2, B)
+    gnode = CUDA.zeros(CT, nx, ny, nz, nblk_node, 2, B)
+    aft   = CUDA.zeros(CT, 2nx, 2ny, 2nz, nblk_node, B)
+    gft   = CUDA.zeros(CT, 2nx, 2ny, 2nz, nblk_node, B)
 
-    # cuFFT plans: batched 3D FFT over dims (1,2,3) with nblk_node*B batch elements
+    # cuFFT plans
     fft_plan  = CUFFT.plan_fft!(aft, (1, 2, 3))
     ifft_plan = CUFFT.plan_ifft!(gft, (1, 2, 3))
 
@@ -249,8 +250,10 @@ function upload_batch_mie!(
         end
     end
 
-    copyto!(buf.t_diag, CuArray(td_cpu))
-    copyto!(buf.t_off,  CuArray(to_cpu))
+    # Downcast to buffer element type (ComplexF32 if float32 mode)
+    CT = eltype(buf.t_diag)
+    copyto!(buf.t_diag, CuArray(CT.(td_cpu)))
+    copyto!(buf.t_off,  CuArray(CT.(to_cpu)))
     return nothing
 end
 
