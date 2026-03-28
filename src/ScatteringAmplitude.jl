@@ -398,8 +398,9 @@ end
         tol::Float64 = 1e-6,
         max_iter::Int = 200,
         use_fft::Bool = false,
-        truncation_order::Union{Int,Nothing} = nothing
-    ) -> ScatteringResult
+        truncation_order::Union{Int,Nothing} = nothing,
+        initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
+    ) -> (ScatteringResult, Matrix{ComplexF64})
 
 Compute multi-sphere scattering amplitudes and cross sections.
 
@@ -408,9 +409,13 @@ Compute multi-sphere scattering amplitudes and cross sections.
 - `radii`: [N] sphere size parameters x_i = k_medium × r_i
 - `m_rel`: complex refractive index m_sphere / m_medium
 - `truncation_order`: if specified, use this VSWF truncation order for all spheres
+- `initial_amn`: if provided, use as initial guess for the iterative solver
+  (continuation method for refractive index sweeps)
 
 # Returns
-`ScatteringResult` with BH83 amplitudes S₁–S₄ at forward/backward and Q efficiencies.
+A tuple `(result, amn)`:
+- `result::ScatteringResult`: BH83 amplitudes S₁–S₄ at forward/backward and Q efficiencies
+- `amn::Matrix{ComplexF64}`: solver coefficients (can be passed as `initial_amn` to a subsequent call)
 """
 function compute_scattering(
     positions::Matrix{Float64},
@@ -421,8 +426,9 @@ function compute_scattering(
     use_fft::Bool = false,
     truncation_order::Union{Int,Nothing} = nothing,
     precomputed_fft::Union{FFTGridData, Nothing} = nothing,
-    solver::Symbol = :cbicg
-)::ScatteringResult
+    solver::Symbol = :cbicg,
+    initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
+)::Tuple{ScatteringResult, Matrix{ComplexF64}}
 
     N = length(radii)
 
@@ -430,7 +436,7 @@ function compute_scattering(
     amn, converged, n_iter, noi_max, nois, offsets, half_nblks, rhs = solve_tmatrix(
         positions, radii, m_rel; tol=tol, max_iter=max_iter, use_fft=use_fft,
         truncation_order=truncation_order, precomputed_fft=precomputed_fft,
-        solver=solver
+        solver=solver, initial_amn=initial_amn
     )
 
     # ── Q_ext (optical theorem) ───────────────────────────────────────────────
@@ -477,7 +483,7 @@ function compute_scattering(
     bh83_fwd = ntuple(i -> -2 * sa_fwd[i], 4)
     bh83_bwd = ntuple(i -> -2 * sa_bwd[i], 4)
 
-    return ScatteringResult(
+    return (ScatteringResult(
         bh83_fwd,
         bh83_bwd,
         Q_ext,
@@ -486,5 +492,5 @@ function compute_scattering(
         converged,
         n_iter,
         noi_max
-    )
+    ), amn)
 end

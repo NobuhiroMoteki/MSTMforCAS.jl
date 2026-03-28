@@ -330,6 +330,17 @@ Key properties of GMRES compared to CBICG:
 \textbf{Performance comparison.}
 For the MSTM problem class, GMRES requires approximately twice as many iterations as CBICG to reach the same residual tolerance, because the CBICG adjoint operator (via S-parity, \eqref{eq:adjoint-symmetry}) provides additional directional information.  The total number of $\mathbf{A}$-operator applications is therefore similar (CBICG: $k$ iterations $\times$ 2; GMRES: $\sim 2k$ iterations $\times$ 1), and the wall-clock performance is comparable.  The default solver remains CBICG, consistent with the Fortran MSTM reference implementation.
 
+\subsection{Continuation method for refractive index sweeps}
+\label{sec:continuation}
+
+When sweeping the complex refractive index $m$ over a grid while keeping the aggregate geometry fixed, the solution $\bm{x}(m)$ of \eqref{eq:global-system} varies continuously with $m$.  A natural acceleration strategy is to use the converged solution $\bm{x}(m_j)$ at grid point $m_j$ as the initial guess $\bm{x}_0$ for the iterative solver at the neighbouring grid point $m_{j+1}$, instead of the default initial guess $\bm{x}_0 = \bm{b} = \mathbf{T}\,\bm{p}_\mathrm{inc}$.  This is known as a \emph{continuation method} (or warm-start).
+
+When the refractive index changes from $m_j$ to $m_{j+1}$, only the Mie coefficients $a_n, b_n$ (and hence the T-matrix $\mathbf{T}$) change; the translation operator $\mathbf{A}$ depends only on geometry and is unchanged.  For small $|m_{j+1} - m_j|$, the new solution is close to the previous one, so the initial residual $\|\bm{b}_{j+1} - \mathbf{L}_{j+1}\,\bm{x}(m_j)\|$ is much smaller than $\|\bm{b}_{j+1} - \mathbf{L}_{j+1}\,\bm{b}_{j+1}\|$, leading to fewer iterations.
+
+The continuation is applied automatically in the parameter sweep (\texttt{run\_parameter\_sweep}): within each (aggregate, medium condition) group, the solver coefficients $\bm{x}$ from the previous refractive index grid point are passed as the initial guess to the next.  If the equation system size changes (e.g., due to a change in the converged Mie truncation order), the continuation is skipped and the default initial guess is used.
+
+Benchmarks (1000 spheres, FFT mode, $\Delta m \approx 0.05$) show a reduction from 15 to 9--11 iterations per grid point, corresponding to a wall-time speedup of approximately $1.2\times$.  For smaller aggregates ($N_p \sim 100$) where the cold-start solver already converges in 3--4 iterations, the improvement is marginal.
+
 \subsection{Incident plane wave coefficients}
 
 For $z$-axis incidence ($\beta = 0$, $\alpha = 0$), only the $m = \pm 1$ multipole components are non-zero due to the azimuthal symmetry of a circularly decomposed plane wave.
@@ -492,7 +503,7 @@ where $S_s^\mathrm{fwd}$ and $S_p^\mathrm{fwd}$ are the forward scattering ampli
   2 & Mie coefficients & $a_n, b_n$ for each sphere & \texttt{MieCoefficients.jl} \\
   3 & Build T-matrix & lr\_tran basis, per sphere & \texttt{TMatrixSolver.jl} \\
   4 & Incident field & $\bm{p}_\mathrm{inc}$ ($m = \pm 1$ terms) & \texttt{TMatrixSolver.jl} \\
-  5 & CBICG solve & $(\mathbf{I} - \mathbf{T}\mathbf{A})\bm{x} = \mathbf{T}\bm{p}_\mathrm{inc}$ & \texttt{TMatrixSolver.jl} \\
+  5 & CBICG solve & $(\mathbf{I} - \mathbf{T}\mathbf{A})\bm{x} = \mathbf{T}\bm{p}_\mathrm{inc}$; warm-start from previous $m$ (\S\ref{sec:continuation}) & \texttt{TMatrixSolver.jl} \\
   6 & Common origin & Translate coefficients & \texttt{ScatteringAmplitude.jl} \\
   7 & Amplitudes & $S_1$--$S_4$ at $\theta = 0^\circ, 180^\circ$ & \texttt{ScatteringAmplitude.jl} \\
   8 & Efficiencies & $Q_\mathrm{ext}$, $Q_\mathrm{sca}$, $Q_\mathrm{abs}$ & \texttt{ScatteringAmplitude.jl} \\
@@ -517,6 +528,7 @@ where $S_s^\mathrm{fwd}$ and $S_p^\mathrm{fwd}$ are the forward scattering ampli
   FFT translation & \eqref{eq:fft-convolution} & \texttt{fft\_translate}, \texttt{setup\_fft\_grid} & \texttt{FFTTranslation.jl} \\
   CBICG solver & \eqref{eq:global-system}, \eqref{eq:adjoint-symmetry}, Table~\ref{tab:cbicg} & \texttt{\_solve\_bicg} & \texttt{TMatrixSolver.jl} \\
   GMRES solver (optional) & \eqref{eq:global-system}, \eqref{eq:krylov-subspace}, Table~\ref{tab:gmres} & \texttt{gmres} (Krylov.jl) & \texttt{TMatrixSolver.jl} \\
+  RI continuation (\S\ref{sec:continuation}) & --- & \texttt{initial\_amn} kwarg & \texttt{TMatrixSolver.jl}, \texttt{ParameterSweep.jl} \\
   Incident coefficients & \eqref{eq:pinc-q1}--\eqref{eq:pinc-q2} & \texttt{incident\_coefficients} & \texttt{TMatrixSolver.jl} \\
   Common-origin expansion & \eqref{eq:common-origin}--\eqref{eq:mode-transform} & \texttt{translate\_to\_common\_origin} & \texttt{ScatteringAmplitude.jl} \\
   BH83 amplitudes $S_1$--$S_4$ & \eqref{eq:bh83-amplitude}--\eqref{eq:amplitude-sum} & \texttt{compute\_amplitude\_matrix} & \texttt{ScatteringAmplitude.jl} \\

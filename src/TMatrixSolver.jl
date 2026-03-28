@@ -271,7 +271,7 @@ end
 # ─────────────────────────────────────────────────────────────
 
 """
-    _solve_bicg(p, apply_L!, apply_Lstar!, norm2_p, tol, max_iter)
+    _solve_bicg(p, apply_L!, apply_Lstar!, norm2_p, tol, max_iter; x0=nothing)
         -> (x, converged, iter)
 
 Solve L·x = p using the Complex BiConjugate Gradient method.
@@ -281,6 +281,8 @@ Solve L·x = p using the Complex BiConjugate Gradient method.
 
 Uses Julia's `dot(a,b) = Σ conj(a)*b` for inner products (mirrors Fortran dot_product).
 Convergence: `real(dot(r,r)) / norm2_p < tol`.
+
+If `x0` is provided, it is used as the initial guess instead of `p` (continuation method).
 """
 function _solve_bicg(
     p::Vector{ComplexF64},
@@ -288,11 +290,12 @@ function _solve_bicg(
     apply_Lstar!::Function,
     norm2_p::Float64,
     tol::Float64,
-    max_iter::Int
+    max_iter::Int;
+    x0::Union{Nothing, Vector{ComplexF64}} = nothing
 )::Tuple{Vector{ComplexF64}, Bool, Int}
 
     neqns = length(p)
-    x   = copy(p)                # initial guess: x = p
+    x   = x0 !== nothing ? copy(x0) : copy(p)  # initial guess: x0 or p
     tmp = zeros(ComplexF64, neqns)
 
     # r = p - L*x  (residual)
@@ -368,7 +371,8 @@ end
         max_iter::Int = 200,
         normalize_error::Bool = true,
         use_fft::Bool = false,
-        truncation_order::Union{Int,Nothing} = nothing
+        truncation_order::Union{Int,Nothing} = nothing,
+        initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
     ) -> (amn, converged, n_iter, noi_max, nois, offsets, half_nblks, rhs)
 
 Solve the multi-sphere T-matrix interaction equation.
@@ -381,6 +385,9 @@ Solve the multi-sphere T-matrix interaction equation.
   instead of automatic determination. Must be ≥ the auto-determined order.
 - `solver`: `:cbicg` (default, Mackowski's Complex BiConjugate Gradient) or
   `:gmres` (GMRES via Krylov.jl — requires only forward operator, no adjoint)
+- `initial_amn`: if provided, use as initial guess for the iterative solver
+  (continuation method). Must have size (neqns, 2) matching the current problem.
+  Ignored if the vector length does not match (e.g., when Mie order changes).
 
 # Returns
 - `amn`: Matrix{ComplexF64} of size (neqns, 2), solution coefficients for polarizations q=1,2.
@@ -402,7 +409,8 @@ function solve_tmatrix(
     use_fft::Bool = false,
     truncation_order::Union{Int,Nothing} = nothing,
     precomputed_fft::Union{FFTGridData, Nothing} = nothing,
-    solver::Symbol = :cbicg
+    solver::Symbol = :cbicg,
+    initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
 )::Tuple{Matrix{ComplexF64}, Bool, Int, Int, Vector{Int}, Vector{Int}, Vector{Int}, Matrix{ComplexF64}}
 
     N = length(radii)
@@ -553,6 +561,9 @@ function solve_tmatrix(
     converged_both = true
     n_iter_max = 0
 
+    # Validate initial_amn: use only if dimensions match
+    use_initial = initial_amn !== nothing && size(initial_amn) == (neqns, 2)
+
     if solver == :gmres
         # GMRES via Krylov.jl — only needs forward operator apply_L!, no adjoint
         opL = LinearOperator(ComplexF64, neqns, neqns, false, false,
@@ -563,8 +574,13 @@ function solve_tmatrix(
                 amn[:, q] .= zero(ComplexF64)
                 continue
             end
-            x_sol, stats = gmres(opL, p_vec; rtol=tol, atol=0.0,
-                                 itmax=max_iter, memory=min(max_iter, 30))
+            if use_initial
+                x_sol, stats = gmres(opL, p_vec, initial_amn[:, q]; rtol=tol, atol=0.0,
+                                     itmax=max_iter, memory=min(max_iter, 30))
+            else
+                x_sol, stats = gmres(opL, p_vec; rtol=tol, atol=0.0,
+                                     itmax=max_iter, memory=min(max_iter, 30))
+            end
             amn[:, q]      .= x_sol
             converged_both  = converged_both && stats.solved
             n_iter_max      = max(n_iter_max, stats.niter)
@@ -577,8 +593,10 @@ function solve_tmatrix(
                 amn[:, q] .= zero(ComplexF64)
                 continue
             end
+            x0_vec = use_initial ? initial_amn[:, q] : nothing
             x_sol, conv, iters = _solve_bicg(
-                p_vec, apply_L!, apply_Lstar!, norm2_p, tol, max_iter
+                p_vec, apply_L!, apply_Lstar!, norm2_p, tol, max_iter;
+                x0=x0_vec
             )
             amn[:, q]      .= x_sol
             converged_both  = converged_both && conv

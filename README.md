@@ -142,17 +142,21 @@ m_sphere   = 1.6 + 0.0123im   # absolute complex RI
 k_medium = 2π * n_medium / wavelength   # [μm⁻¹]
 m_rel    = m_sphere / n_medium           # relative RI
 
-# Compute (direct translation)
-result = compute_scattering(agg, m_rel, k_medium)
+# Compute (direct translation) — returns (ScatteringResult, amn)
+result, _ = compute_scattering(agg, m_rel, k_medium)
 
 # Compute (FFT-accelerated translation — faster for N > ~100 spheres)
-result = compute_scattering(agg, m_rel, k_medium; use_fft=true)
+result, _ = compute_scattering(agg, m_rel, k_medium; use_fft=true)
 
 # Compute with user-specified truncation order
-result = compute_scattering(agg, m_rel, k_medium; truncation_order=8)
+result, _ = compute_scattering(agg, m_rel, k_medium; truncation_order=8)
 
 # Compute with GMRES solver instead of default CBICG
-result = compute_scattering(agg, m_rel, k_medium; use_fft=true, solver=:gmres)
+result, _ = compute_scattering(agg, m_rel, k_medium; use_fft=true, solver=:gmres)
+
+# Continuation method: pass previous solution as initial guess for RI sweep
+result1, amn1 = compute_scattering(agg, m_rel_1, k_medium; use_fft=true)
+result2, amn2 = compute_scattering(agg, m_rel_2, k_medium; use_fft=true, initial_amn=amn1)
 
 # Access results
 result.S_forward        # (S₁, S₂, S₃, S₄) BH83, dimensionless, θ=0°
@@ -437,6 +441,16 @@ All timings on a single core (no MPI, no multi-threading). Julia version: 1.11, 
 **Multi-threading**: Parallelization is at the **parameter sweep level**, not within a single aggregate computation. Jobs are grouped by (aggregate, medium_condition), and `Threads.@threads :dynamic` distributes groups across threads with work-stealing load balancing. Groups are sorted by descending monomer count so large aggregates start first. Within each group, all refractive index values share the precomputed FFT grid. Start Julia with `julia -t auto` or `julia -t N`.
 
 This task-level parallelism is far more efficient than parallelizing within a single solver call because: (1) each job is fully independent — zero inter-thread communication and synchronization, giving near-linear scaling; (2) intra-solver parallelism (e.g., threading the O(N²) translation loop) would require synchronization at every BiCG iteration, and Amdahl's law limits the practical speedup to 2–5×. For typical CAS parameter sweeps (thousands of jobs across aggregates, medium conditions, and refractive indices), task-level parallelism with C cores gives ~C× speedup as long as the number of jobs exceeds C.
+
+**Continuation method for RI sweeps**: When sweeping over refractive indices for the same aggregate geometry, `run_parameter_sweep` automatically uses the previous solution as the initial guess for the iterative solver (continuation method). This reduces the number of CBICG iterations for each subsequent RI grid point. Benchmark results (1000 spheres, FFT mode, $\Delta m \approx 0.05$):
+
+| | Cold start | Warm start (continuation) |
+|---|---|---|
+| Iterations per point | 15 | 9–11 (after 1st point) |
+| Total time (8 RI points) | 46.3 s | 38.4 s |
+| Speedup | — | **1.2×** |
+
+The speedup is most significant for large aggregates where the solver requires many iterations. For small aggregates (Np~100, ~4 iterations), the improvement is marginal. The continuation is applied automatically within each (aggregate, medium_condition) group and has zero overhead when not beneficial (dimension mismatch triggers automatic fallback to the default initial guess).
 
 **Progress and crash recovery**: Results are flushed to HDF5 every ~60 seconds with a result snapshot (CAS amplitudes, Q_ext). Remaining time is estimated from the observed job completion rate, displayed in days. If the process is interrupted, restarting with the same output file automatically resumes from where it left off.
 

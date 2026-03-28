@@ -35,7 +35,7 @@ positions = zeros(3, 1)             # [3 × 1], sphere at origin
 radii_x   = [x]                    # size parameter
 println("Computing...")
 t0 = time()
-result = compute_scattering(positions, radii_x, m_rel)
+result, _ = compute_scattering(positions, radii_x, m_rel)
 dt = time() - t0
 println("Elapsed: $(round(dt, digits=2)) s")
 println("Converged: $(result.converged), iterations: $(result.n_iterations)")

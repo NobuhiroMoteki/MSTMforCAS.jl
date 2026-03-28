@@ -179,7 +179,7 @@ end
 
 """
     compute_scattering(agg::AggregateGeometry, m_rel::ComplexF64, k::Float64;
-                       tol, max_iter) -> ScatteringResult
+                       tol, max_iter, initial_amn) -> (ScatteringResult, Matrix{ComplexF64})
 
 Compute scattering for an `AggregateGeometry` object.
 
@@ -187,6 +187,8 @@ Compute scattering for an `AggregateGeometry` object.
 - `agg`: aggregate geometry (positions and radii in physical units consistent with `k`)
 - `m_rel`: complex refractive index relative to medium, m_sphere / n_medium
 - `k`: wavenumber in the medium, k = 2π × n_medium / λ₀ (same units⁻¹ as agg coordinates)
+- `initial_amn`: if provided, use as initial guess for the iterative solver
+  (continuation method for refractive index sweeps)
 
 The function scales `agg.positions` and `agg.radii` by `k` to obtain dimensionless size
 parameters before calling the core solver.
@@ -200,13 +202,15 @@ function compute_scattering(
     use_fft::Bool    = false,
     truncation_order::Union{Int,Nothing} = nothing,
     precomputed_fft::Union{FFTGridData, Nothing} = nothing,
-    solver::Symbol = :cbicg
-)::ScatteringResult
+    solver::Symbol = :cbicg,
+    initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
+)::Tuple{ScatteringResult, Matrix{ComplexF64}}
     positions_x = agg.positions .* k   # dimensionless (size parameters)
     radii_x     = agg.radii     .* k
     return compute_scattering(positions_x, radii_x, m_rel; tol=tol, max_iter=max_iter,
                               use_fft=use_fft, truncation_order=truncation_order,
-                              precomputed_fft=precomputed_fft, solver=solver)
+                              precomputed_fft=precomputed_fft, solver=solver,
+                              initial_amn=initial_amn)
 end
 
 # ─────────────────────────────────────────────────────────────
@@ -314,7 +318,7 @@ function run_parameter_sweep(
         compute_scattering(agg0, m_rel0, k0;
             tol=config.convergence_epsilon, max_iter=config.max_iterations,
             use_fft=config.use_fft, truncation_order=config.truncation_order,
-            solver=config.solver)
+            solver=config.solver)  # returns (ScatteringResult, amn); result discarded
     end
 
     # ── Weighted ETA: estimate total work using cost proxy per job ───────────
@@ -371,14 +375,19 @@ function run_parameter_sweep(
             fft_cache = init_fft_grid(positions_x, radii_x, nois_for_grid)
         end
 
+        # Continuation method: carry previous solution as initial guess
+        local prev_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
+
         for mi in mi_list
             m_abs   = ri_grid[mi]
             m_rel   = m_abs / n_med
 
-            r = compute_scattering(agg, m_rel, k;
+            r, amn_out = compute_scattering(agg, m_rel, k;
                 tol=config.convergence_epsilon, max_iter=config.max_iterations,
                 use_fft=config.use_fft, truncation_order=config.truncation_order,
-                precomputed_fft=fft_cache, solver=config.solver)
+                precomputed_fft=fft_cache, solver=config.solver,
+                initial_amn=prev_amn)
+            prev_amn = amn_out
 
             # MI02 amplitudes: S11=S2/(-ik), S22=S1/(-ik), S12=S3/(ik), S21=S4/(ik)
             ik = im * k

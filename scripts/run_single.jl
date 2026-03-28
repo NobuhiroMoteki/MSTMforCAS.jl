@@ -63,7 +63,7 @@ println()
 # ─── Compute scattering ──────────────────────────────────────────────────
 println("Computing (use_fft=$use_fft, truncation_order=$(truncation_order === nothing ? "auto" : truncation_order))...")
 t0 = time()
-result = compute_scattering(agg, m_rel, k_medium; use_fft=use_fft, truncation_order=truncation_order)
+result, _ = compute_scattering(agg, m_rel, k_medium; use_fft=use_fft, truncation_order=truncation_order)
 dt = time() - t0
 println("Elapsed: $(round(dt, digits=2)) s")
 println("Converged: $(result.converged), iterations: $(result.n_iterations), truncation_order: $(result.truncation_order)")
