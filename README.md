@@ -473,6 +473,7 @@ The GPU solver processes multiple refractive index values simultaneously on a si
 
 ```bash
 # GPU with Float64 precision (A100/H100 recommended)
+# Note: -t auto is not needed — the GPU provides parallelism via batching.
 julia --project=. scripts/run_sweep_h5.jl --gpu
 
 # GPU with Float32 precision (~32× more throughput on consumer GPUs)

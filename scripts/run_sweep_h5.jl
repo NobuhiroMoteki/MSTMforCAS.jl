@@ -87,6 +87,9 @@ println("Medium conditions ($n_mc): $(config.medium_conditions)")
 println("RI grid: m_real ∈ [$mr_min, $mr_max] (n=$mr_n) × m_imag ∈ [$mi_min, $mi_max] (n=$mi_n) → $n_ri RI values")
 println("Total jobs: $n_jobs ($(length(aggregates)) aggregates × $n_mc media × $n_ri RIs)")
 println("Threads: $(Threads.nthreads()), use_fft: $use_fft, use_gpu: $use_gpu, gpu_float32: $gpu_float32, truncation_order: $(truncation_order === nothing ? "auto" : truncation_order)")
+if !use_gpu && Threads.nthreads() == 1
+    @warn "Running CPU mode with 1 thread. Use `julia -t auto` for multi-threaded parallel execution."
+end
 println()
 
 # ─── Output path ─────────────────────────────────────────────────────────────
