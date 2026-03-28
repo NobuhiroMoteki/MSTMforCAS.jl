@@ -277,8 +277,9 @@ function run_parameter_sweep(
     if config.use_gpu && _gpu_batch_solve_ref[] === nothing
         @warn "use_gpu=true but CUDA extension not loaded. Run `using CUDA` first. Falling back to CPU."
     end
-    # GPU implies FFT mode
-    effective_use_fft = config.use_fft || gpu_active
+    # FFT mode: explicit config, GPU mode, or auto (Np > 20 for any aggregate)
+    auto_fft = any(a.n_monomers > 20 for a in aggregates)
+    effective_use_fft = config.use_fft || gpu_active || auto_fft
 
     if n_jobs_total == 0
         return nothing

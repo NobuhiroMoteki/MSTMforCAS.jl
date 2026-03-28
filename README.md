@@ -78,7 +78,7 @@ All length inputs (positions, radii, wavelength) must be given in **the same phy
 | `medium_conditions` | `Vector{Tuple{Float64,Float64}}` | List of (wavelength, medium_refindex) pairs. Wavelength in the same unit as coordinates. | `[(0.6328, 1.0), (0.6328, 1.33)]` |
 | `m_real_range` | `Tuple{Float64,Float64,Int}` | (min, max, n_grid) for real part of **absolute** complex RI (BH83 sign convention). Single value: `(1.6, 1.6, 1)`. | `(1.5, 1.7, 3)` |
 | `m_imag_range` | `Tuple{Float64,Float64,Int}` | (min, max, n_grid) for imaginary part (positive κ = absorption). | `(0.0, 0.1, 2)` |
-| `use_fft` | `Bool` | FFT-accelerated translation (default `false`) | `true` |
+| `use_fft` | `Bool` | FFT-accelerated translation (default `false`; auto-enabled when any aggregate has Np > 20) | `true` |
 | `truncation_order` | `Union{Int,Nothing}` | Override VSWF truncation order (default `nothing` = auto) | `8` |
 | `solver` | `Symbol` | Iterative solver: `:cbicg` (default) or `:gmres` | `:gmres` |
 | `use_gpu` | `Bool` | GPU-accelerated batched solver (default `false`; implies `use_fft=true`) | `true` |
