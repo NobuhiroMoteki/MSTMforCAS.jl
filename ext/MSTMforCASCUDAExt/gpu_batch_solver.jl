@@ -245,7 +245,7 @@ function gpu_batch_solve_group(
     gpu_fft = upload_fft_data(fft_cache, noi_max, N)
 
     # Determine batch size
-    B = determine_batch_size(neqns, gpu_fft, n_ri)
+    B = determine_batch_size(neqns, gpu_fft, n_ri; float32=use_f32)
     prec_str = use_f32 ? "Float32" : "Float64"
     @info "GPU batch solver" N=N noi_max=noi_max neqns=neqns n_ri=n_ri batch_size=B precision=prec_str tol=tol
 

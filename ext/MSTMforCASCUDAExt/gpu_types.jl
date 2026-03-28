@@ -265,21 +265,25 @@ function determine_batch_size(
     neqns::Int,
     gpu_fft::GPUFFTData,
     n_ri::Int;
-    max_batch::Int = 200
+    float32::Bool = false
 )::Int
     available = round(Int, Float64(CUDA.available_memory()) * 0.80)  # 80% safety margin
 
     nblk_node = gpu_fft.nblk_node
     nx, ny, nz = gpu_fft.cell_dim
+    # BiCG working vectors use the solver precision; FFT buffers are always Float64
+    bicg_elem = float32 ? sizeof(ComplexF32) : sizeof(ComplexF64)
 
-    # Per-RI memory: BiCG vectors + FFT buffers
+    # Per-RI memory: BiCG vectors + FFT translation working buffers
     per_ri = (
-        10 * neqns * sizeof(ComplexF64) +                       # BiCG vectors
-        2 * nx * ny * nz * nblk_node * sizeof(ComplexF64) +     # anode/gnode per RI
-        2 * 8 * nx * ny * nz * nblk_node * sizeof(ComplexF64) + # aft/gft per RI
-        2 * sizeof(ComplexF64) + 2 * sizeof(Float64)            # scalars
+        10 * neqns * bicg_elem +                                    # BiCG vectors (precision-aware)
+        2 * nx * ny * nz * nblk_node * sizeof(ComplexF64) +         # anode/gnode per RI
+        2 * 8 * nx * ny * nz * nblk_node * sizeof(ComplexF64) +     # aft/gft per RI
+        2 * sizeof(ComplexF64) + 2 * sizeof(Float64)                # scalars
     )
 
+    # No artificial cap — let available VRAM determine the batch size.
+    # Capped at n_ri so we never allocate more than needed.
     B_max = max(1, available ÷ per_ri)
-    return min(B_max, n_ri, max_batch)
+    return min(B_max, n_ri)
 end
