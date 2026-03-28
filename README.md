@@ -48,11 +48,35 @@ where $C$ is the cross section and $R_{\rm ve}$ is the volume-equivalent sphere 
 
 ## Installation
 
-```julia
-using Pkg
-Pkg.activate(".")
-Pkg.instantiate()
+### From GitHub (new machine)
+
+```bash
+git clone https://github.com/NobuhiroMoteki/MSTMforCAS.jl.git
+cd MSTMforCAS.jl
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ```
+
+This installs all CPU dependencies from the lock file (`Manifest.toml`). To verify:
+
+```bash
+julia --project=. -e 'using Pkg; Pkg.test()'
+```
+
+### GPU support (optional)
+
+GPU acceleration requires an NVIDIA GPU with CUDA driver and the CUDA.jl package:
+
+```bash
+julia --project=. -e 'using Pkg; Pkg.add("CUDA")'
+```
+
+Verify GPU detection:
+
+```bash
+julia --project=. -e 'using CUDA; println(CUDA.functional()); println(CUDA.name(CUDA.device()))'
+```
+
+CUDA.jl automatically downloads the appropriate CUDA toolkit — no manual CUDA installation is needed. The GPU extension is loaded automatically when `using CUDA` is called after `using MSTMforCAS`.
 
 ### Dependencies
 
