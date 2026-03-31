@@ -74,6 +74,7 @@ config = SweepConfig(
     truncation_order   = truncation_order,
     use_gpu            = use_gpu,
     gpu_float32        = gpu_float32,
+    gpu_np_threshold   = 500,
 )
 
 n_mc = length(config.medium_conditions)

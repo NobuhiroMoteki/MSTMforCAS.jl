@@ -357,9 +357,11 @@ function gpu_batch_solve_group(
     x_eff   = cbrt(sum(r^3 for r in radii_x))
     norm_fac = 2.0 / x_eff^2
 
-    # ── Post-process entire batch at once (batched GEMM over B RI) ─────────
+    # ── Post-process batch: H_i computed once per sphere, GEMV per (bi,q) ───
     # compute_translation_matrix called N times (once per sphere, not N×bs).
-    # H_i @ amn_all computed via BLAS GEMM over all bs RI simultaneously.
+    # H_i is applied to each (bi,q) via BLAS GEMV — no large intermediates.
+    # (Previous GEMM approach allocated hnb_i×2bs per sphere, causing OOM/GC storm
+    # for large aggregates where hnb_i can reach ~40000 with bs=300+.)
     function _postprocess_batch!(results_ref, batch_start_local, prep, sol)
         bs = size(sol.amn, 3)
 
@@ -373,15 +375,10 @@ function gpu_batch_solve_group(
             Q_ext_all[bi] = -norm_fac * s
         end
 
-        # Common-origin translation: H_i computed once, applied to all bs RI.
-        # amn0_mode1/mode2: (hnb0_g, 2, bs) — accumulator for all spheres.
+        # Common-origin translation: H_i computed once per sphere (not per RI).
+        # Serial sphere loop; BLAS GEMV (hnb_i,) per (bi, q) — O(1) allocation.
         amn0_mode1 = zeros(ComplexF64, hnb0_g, 2, bs)
         amn0_mode2 = zeros(ComplexF64, hnb0_g, 2, bs)
-
-        # Reusable work buffers for per-sphere p1/p2 extraction: (hnb, 2*bs)
-        max_hnb = maximum(half_nblks)
-        work_p1 = Matrix{ComplexF64}(undef, max_hnb, 2 * bs)
-        work_p2 = Matrix{ComplexF64}(undef, max_hnb, 2 * bs)
 
         for i in 1:N
             off   = offsets[i]
@@ -393,47 +390,32 @@ function gpu_batch_solve_group(
             r_trans = r0 .- positions_x[:, i]
             dist = sqrt(r_trans[1]^2 + r_trans[2]^2 + r_trans[3]^2)
 
-            # Extract p1/p2 blocks for all RI into contiguous (hnb, 2*bs) matrices
-            @inbounds for bi in 1:bs, q in 1:2
-                col = (bi - 1) * 2 + q
-                for mn in 1:hnb
-                    work_p1[mn, col] = sol.amn[off + mn, q, bi]
-                    work_p2[mn, col] = sol.amn[off + hnb + mn, q, bi]
-                end
-            end
-            p1 = view(work_p1, 1:hnb, :)
-            p2 = view(work_p2, 1:hnb, :)
-
             if dist < 1e-10
-                # Zero displacement: direct accumulation
                 n_copy = min(hnb, hnb_i)
                 @inbounds for bi in 1:bs, q in 1:2
-                    col = (bi - 1) * 2 + q
                     for mn in 1:n_copy
-                        v1 = work_p1[mn, col]; v2 = work_p2[mn, col]
+                        v1 = sol.amn[off + mn, q, bi]
+                        v2 = sol.amn[off + hnb + mn, q, bi]
                         amn0_mode1[mn, q, bi] += v1 + v2
                         amn0_mode2[mn, q, bi] += v1 - v2
                     end
                 end
             else
-                # Compute H_i ONCE for this sphere (geometry-only, RI-independent)
+                # Compute H_i ONCE (geometry-only, shared across all bs RI values)
                 H = MSTMforCAS.compute_translation_matrix(
                     r_trans, ComplexF64(1.0), noi, ntri; use_regular=true)
                 H_p1 = H[:, :, 1]  # (hnb_i, hnb)
                 H_p2 = H[:, :, 2]  # (hnb_i, hnb)
 
-                # BLAS GEMM: (hnb_i × hnb) × (hnb × 2bs) → (hnb_i × 2bs)
-                # Applies H_i to all bs RI values in one kernel call.
-                r1 = H_p1 * p1
-                r2 = H_p2 * p2
-
-                # Accumulate into amn0: un-interleave (hnb_i, 2bs) → (hnb_i, 2, bs)
+                # Per-(bi,q) BLAS GEMV: O(hnb_i) allocation, no blow-up
+                r1_tmp = Vector{ComplexF64}(undef, hnb_i)
+                r2_tmp = Vector{ComplexF64}(undef, hnb_i)
                 @inbounds for bi in 1:bs, q in 1:2
-                    col = (bi - 1) * 2 + q
+                    mul!(r1_tmp, H_p1, view(sol.amn, off+1:off+hnb,       q, bi))
+                    mul!(r2_tmp, H_p2, view(sol.amn, off+hnb+1:off+2*hnb, q, bi))
                     for kl in 1:hnb_i
-                        v1 = r1[kl, col]; v2 = r2[kl, col]
-                        amn0_mode1[kl, q, bi] += v1 + v2
-                        amn0_mode2[kl, q, bi] += v1 - v2
+                        amn0_mode1[kl, q, bi] += r1_tmp[kl] + r2_tmp[kl]
+                        amn0_mode2[kl, q, bi] += r1_tmp[kl] - r2_tmp[kl]
                     end
                 end
             end
