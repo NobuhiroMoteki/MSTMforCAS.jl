@@ -6,7 +6,7 @@ GPU data structures and CPU↔GPU transfer functions for the batched BiCG solver
 # GPU mirror of FFTGridData (geometry-dependent, shared across all RIs)
 # ─────────────────────────────────────────────────────────────
 
-struct GPUFFTData
+struct GPUFFTData{CT<:Complex}
     cell_dim      ::NTuple{3, Int}
     d_cell        ::Float64
     node_order    ::Int
@@ -15,16 +15,13 @@ struct GPUFFTData
 
     # Sphere-node translation matrices, padded to uniform hnb_max
     # shape: (nblk_node, hnb_max, 2, N)
-    # Always stored as ComplexF64: mixed-precision approach where the translation
-    # operator (geometry) stays F64 for accuracy, while BiCG state vectors use
-    # the solver precision (CT). This dramatically improves BiCG convergence.
-    sphere_node_H ::CuArray{ComplexF64, 4}
-    node_sphere_H ::CuArray{ComplexF64, 4}
+    sphere_node_H ::CuArray{CT, 4}
+    node_sphere_H ::CuArray{CT, 4}
 
     # Cell-to-cell translation kernels in frequency domain
     # shape: (2nx, 2ny, 2nz, nblk_node, nblk_node)
-    cell_tran_fft_p1 ::CuArray{ComplexF64, 5}
-    cell_tran_fft_p2 ::CuArray{ComplexF64, 5}
+    cell_tran_fft_p1 ::CuArray{CT, 5}
+    cell_tran_fft_p2 ::CuArray{CT, 5}
 
     # Sphere-to-grid-cell mapping: (3, N) Int32
     sphere_node_idx ::CuArray{Int32, 2}
@@ -33,7 +30,7 @@ struct GPUFFTData
     # For sphere i, neighbors are nearfield_col[nearfield_ptr[i]:nearfield_ptr[i+1]-1]
     nearfield_ptr    ::CuArray{Int32, 1}         # length N+1
     nearfield_col    ::CuArray{Int32, 1}         # total neighbor entries
-    nearfield_H_flat ::CuArray{ComplexF64, 1}    # flattened H matrices
+    nearfield_H_flat ::CuArray{CT, 1}            # flattened H matrices
     nearfield_H_offsets ::CuArray{Int32, 1}      # offset into flat for each entry
     hnb_max          ::Int                        # padded half-block size
 end
@@ -92,8 +89,10 @@ end
 function upload_fft_data(
     fft_data::MSTMforCAS.FFTGridData,
     noi_max::Int,
-    N::Int
+    N::Int;
+    float32::Bool = false
 )
+    CT = float32 ? ComplexF32 : ComplexF64
     nblk_node = fft_data.nblk_node
     hnb_max   = noi_max * (noi_max + 2)
 
@@ -134,23 +133,20 @@ function upload_fft_data(
         push!(ptr, Int32(length(col) + 1))
     end
 
-    # Geometry always stored as ComplexF64 regardless of solver precision.
-    # Mixed-precision: F64 translation operator × F32 state vectors gives much
-    # better BiCG convergence than pure F32 geometry (empirically ~3-4× fewer iters).
     return GPUFFTData(
         fft_data.cell_dim,
         fft_data.d_cell,
         fft_data.node_order,
         nblk_node,
         N,
-        CuArray(s2n),
-        CuArray(n2s),
-        CuArray(fft_data.cell_tran_fft_p1),
-        CuArray(fft_data.cell_tran_fft_p2),
+        CuArray(CT.(s2n)),
+        CuArray(CT.(n2s)),
+        CuArray(CT.(fft_data.cell_tran_fft_p1)),
+        CuArray(CT.(fft_data.cell_tran_fft_p2)),
         CuArray(sn_idx),
         CuArray(ptr),
         CuArray(col),
-        CuArray(h_flat),
+        CuArray(CT.(h_flat)),
         CuArray(h_offsets),
         hnb_max,
     )
@@ -288,8 +284,11 @@ function determine_batch_size(
         2 * sizeof(ComplexF64) + 2 * sizeof(Float64)                # scalars
     )
 
-    # No artificial cap — let available VRAM determine the batch size.
-    # Capped at n_ri so we never allocate more than needed.
+    # Cap at 250: prevents mixing easy and hard RI values in the same batch.
+    # Hard RI (high m_imag) require many BiCG iterations; putting them in a
+    # smaller dedicated batch avoids dragging fast-converging RI through 200
+    # iterations of F32 work. Empirically this recovers ~3-4× throughput for
+    # open-fractal aggregates vs an uncapped batch.
     B_max = max(1, available ÷ per_ri)
-    return min(B_max, n_ri)
+    return min(B_max, n_ri, 250)
 end

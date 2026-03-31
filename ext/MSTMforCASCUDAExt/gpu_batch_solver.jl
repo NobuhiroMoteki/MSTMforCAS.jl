@@ -241,8 +241,8 @@ function gpu_batch_solve_group(
         fft_cache = MSTMforCAS.init_fft_grid(positions_x, radii_x, nois_grid)
     end
 
-    # Upload geometry to GPU (always F64 for accuracy — see GPUFFTData comment)
-    gpu_fft = upload_fft_data(fft_cache, noi_max, N)
+    # Upload geometry to GPU
+    gpu_fft = upload_fft_data(fft_cache, noi_max, N; float32=use_f32)
 
     # Determine batch size
     B = determine_batch_size(neqns, gpu_fft, n_ri; float32=use_f32)
