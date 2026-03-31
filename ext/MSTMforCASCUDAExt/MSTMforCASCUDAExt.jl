@@ -11,7 +11,7 @@ using MSTMforCAS
 using CUDA
 using CUDA: CuArray, CuVector, CuMatrix
 import CUDA.CUFFT
-using LinearAlgebra: dot, norm
+using LinearAlgebra: dot, norm, mul!
 
 include("gpu_types.jl")
 include("gpu_kernels.jl")
