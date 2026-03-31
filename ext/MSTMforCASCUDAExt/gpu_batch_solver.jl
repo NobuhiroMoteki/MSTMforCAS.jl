@@ -392,12 +392,15 @@ function gpu_batch_solve_group(
 
             if dist < 1e-10
                 n_copy = min(hnb, hnb_i)
-                @inbounds for bi in 1:bs, q in 1:2
-                    for mn in 1:n_copy
-                        v1 = sol.amn[off + mn, q, bi]
-                        v2 = sol.amn[off + hnb + mn, q, bi]
-                        amn0_mode1[mn, q, bi] += v1 + v2
-                        amn0_mode2[mn, q, bi] += v1 - v2
+                # Parallelize over bi: each bi owns amn0[*,*,bi] — no write conflict
+                Threads.@threads for bi in 1:bs
+                    for q in 1:2
+                        @inbounds for mn in 1:n_copy
+                            v1 = sol.amn[off + mn, q, bi]
+                            v2 = sol.amn[off + hnb + mn, q, bi]
+                            amn0_mode1[mn, q, bi] += v1 + v2
+                            amn0_mode2[mn, q, bi] += v1 - v2
+                        end
                     end
                 end
             else
@@ -407,15 +410,18 @@ function gpu_batch_solve_group(
                 H_p1 = H[:, :, 1]  # (hnb_i, hnb)
                 H_p2 = H[:, :, 2]  # (hnb_i, hnb)
 
-                # Per-(bi,q) BLAS GEMV: O(hnb_i) allocation, no blow-up
-                r1_tmp = Vector{ComplexF64}(undef, hnb_i)
-                r2_tmp = Vector{ComplexF64}(undef, hnb_i)
-                @inbounds for bi in 1:bs, q in 1:2
-                    mul!(r1_tmp, H_p1, view(sol.amn, off+1:off+hnb,       q, bi))
-                    mul!(r2_tmp, H_p2, view(sol.amn, off+hnb+1:off+2*hnb, q, bi))
-                    for kl in 1:hnb_i
-                        amn0_mode1[kl, q, bi] += r1_tmp[kl] + r2_tmp[kl]
-                        amn0_mode2[kl, q, bi] += r1_tmp[kl] - r2_tmp[kl]
+                # Parallelize over bi: each thread allocates its own r1_tmp/r2_tmp.
+                # H_p1/H_p2 are read-only shared; amn0[*,*,bi] is disjoint per bi.
+                Threads.@threads for bi in 1:bs
+                    r1_tmp = Vector{ComplexF64}(undef, hnb_i)
+                    r2_tmp = Vector{ComplexF64}(undef, hnb_i)
+                    for q in 1:2
+                        mul!(r1_tmp, H_p1, view(sol.amn, off+1:off+hnb,       q, bi))
+                        mul!(r2_tmp, H_p2, view(sol.amn, off+hnb+1:off+2*hnb, q, bi))
+                        @inbounds for kl in 1:hnb_i
+                            amn0_mode1[kl, q, bi] += r1_tmp[kl] + r2_tmp[kl]
+                            amn0_mode2[kl, q, bi] += r1_tmp[kl] - r2_tmp[kl]
+                        end
                     end
                 end
             end
