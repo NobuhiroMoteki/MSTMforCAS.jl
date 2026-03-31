@@ -122,7 +122,7 @@ function _fft_kernel_multiply_kernel!(
     l    = rem1 ÷ (n2x * n2y * n2z) + 1
     pt   = rem1 % (n2x * n2y * n2z) + 1
 
-    acc = zero(ComplexF64)
+    acc = zero(eltype(gft))
     for n in Int32(1):Int32(nblk)
         acc += tran_fft[pt, l, n] * aft[pt, n, b]
     end
@@ -207,7 +207,7 @@ function _node_to_sphere_kernel!(
 
     for p in Int32(1):Int32(2)
         p_off = (p - 1) * hnb_max
-        acc = zero(ComplexF64)
+        acc = zero(eltype(out))
         for kl in Int32(1):Int32(nblk_node)
             acc += n2s_H[mn, kl, p, i] * gnode[ix, iy, iz, kl, p, b]
         end
