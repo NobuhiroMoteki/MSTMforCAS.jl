@@ -51,7 +51,7 @@ where $C$ is the cross section and $R_{\rm ve}$ is the volume-equivalent sphere 
 ### From GitHub (new machine)
 
 ```bash
-git clone https://github.com/NobuhiroMoteki/MSTMforCAS.jl.git
+git clone https://github.com/MOTEKI-LAB/MSTMforCAS.jl.git
 cd MSTMforCAS.jl
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ```
