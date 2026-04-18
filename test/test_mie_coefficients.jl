@@ -174,6 +174,46 @@ using MSTMforCAS
         end
     end
 
+    @testset "S_forward convergence under truncation_order sweep (Au doublet)" begin
+        # Regression for jₙ(z) upward-recurrence instability in
+        # compute_translation_matrix: at sub-wavelength x the merge-to-origin
+        # translation evaluated jₙ(k·|rᵢⱼ|) up to n ≈ 2·truncation_order via
+        # upward recurrence, which amplifies the yₙ component at per-step
+        # rate (2n-1)/z ≈ 50-100 and overwhelms jₙ for n > |z|.  At N = 8
+        # that pushed |S_fw| from its physical value 0.064 to 3.23; at N = 15
+        # to 5.3×10¹⁶.  Miller downward recurrence restores machine-precision
+        # accuracy at all n, so S_fw must now converge and stay flat as N
+        # exceeds the physical cutoff.
+        k = 2π / 0.638
+        R = 0.030
+        d = 2R + 0.003
+        positions = [0.0 0.0; 0.0 0.0; -d/2 +d/2]
+        radii     = [R, R]
+        m_rel     = ComplexF64(0.17525, 3.4830)
+
+        positions_x = positions .* k
+        radii_x     = radii     .* k
+
+        # Reference at N = 10 (well past the x ≈ 0.3 physical cutoff).
+        ref, _ = compute_scattering(
+            positions_x, radii_x, m_rel; truncation_order = 10, tol = 1e-10)
+        @test isapprox(abs(ref.S_forward[1]), 0.064; atol = 0.01)
+
+        # Convergence plateau: every truncation_order from 5 through 20 must
+        # reproduce the reference within 0.1 %.
+        for N in (5, 7, 8, 10, 12, 15, 20)
+            r, _ = compute_scattering(
+                positions_x, radii_x, m_rel;
+                truncation_order = N, tol = 1e-10)
+            for j in 1:4
+                @test isapprox(r.S_forward[j],  ref.S_forward[j];  rtol = 1e-3, atol = 1e-6)
+                @test isapprox(r.S_backward[j], ref.S_backward[j]; rtol = 1e-3, atol = 1e-6)
+            end
+            @test isapprox(r.Q_ext, ref.Q_ext; rtol = 1e-3)
+            @test isapprox(r.Q_abs, ref.Q_abs; rtol = 1e-3)
+        end
+    end
+
     @testset "Backward compatibility: upward-stable regime (x = 5, m = 1.33)" begin
         # Frozen reference values from the pre-Miller upward implementation
         # at x = 5, m = 1.33+0.0i, for n = 1..5 (within the upward-stable range).

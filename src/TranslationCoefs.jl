@@ -263,25 +263,48 @@ function _hankel_upward!(buf::Vector{ComplexF64}, nmax::Int, z::ComplexF64)
     end
 end
 
+# Regular spherical Bessel jₙ(z) by Miller DOWNWARD recurrence (Wiscombe 1980).
+#
+# jₙ is the minimal (decaying) solution of the three-term recurrence
+#   jₙ₋₁ + jₙ₊₁ = (2n+1)/z · jₙ,
+# so the forward direction amplifies the growing solution yₙ at rate (2n-1)/z
+# and destroys jₙ once n ≳ |z|.  In the translation matrix we evaluate
+# jₙ(k·|rᵢⱼ|) at n up to ≈ nois[i] + ntrani[i] ≈ 2·truncation_order with
+# k·|rᵢⱼ| ~ O(x_sphere), so for sub-wavelength aggregates the upward form
+# is catastrophically unstable.  (See Bohren & Huffman 1983 App. A p.478,
+# Wiscombe 1980 Applied Optics 19:1505; identical mechanism to the ψₙ fix
+# in MieCoefficients.jl.)  Seed jₙstart+1 = 0, jₙstart = 1, recur down,
+# normalise by j₀(z) = sin(z)/z.
 function _bessel_upward(nmax::Int, z::ComplexF64)::Vector{ComplexF64}
-    jn = Vector{ComplexF64}(undef, nmax + 1)
-    jn[1] = sin(z) / z                               # j_0(z)
-    nmax == 0 && return jn
-    jn[2] = sin(z) / z^2 - cos(z) / z               # j_1(z)
-    for n in 2:nmax
-        jn[n+1] = Float64(2n-1)/z * jn[n] - jn[n-1]
-    end
+    nstart = max(nmax, ceil(Int, abs(z))) + 16
+    jn = Vector{ComplexF64}(undef, nstart + 2)
+    _bessel_upward!(jn, nmax, z)
+    resize!(jn, nmax + 1)
     return jn
 end
 
-# In-place version (no allocation): fills buf[1..nmax+1]
+# In-place Miller downward recurrence for jₙ(z).
+# Caller must pre-allocate buf with length ≥ nmax + 18 (the extra 17 slots
+# hold the downward-recurrence seeds and margin; see apply_translation_mvp!
+# docstring).  On return, buf[n+1] = jₙ(z) for n = 0, 1, ..., nmax.
 function _bessel_upward!(buf::Vector{ComplexF64}, nmax::Int, z::ComplexF64)
-    buf[1] = sin(z) / z
-    nmax == 0 && return
-    buf[2] = sin(z) / z^2 - cos(z) / z
-    for n in 2:nmax
-        buf[n+1] = Float64(2n-1)/z * buf[n] - buf[n-1]
+    nstart = max(nmax, ceil(Int, abs(z))) + 16
+    @boundscheck length(buf) >= nstart + 2 ||
+        throw(ArgumentError("_bessel_upward! needs buf length ≥ nmax+18"))
+    @inbounds begin
+        buf[nstart + 2] = zero(ComplexF64)   # jₙstart+1 seed
+        buf[nstart + 1] = one(ComplexF64)    # jₙstart seed
+        for n in nstart:-1:1
+            # jₙ₋₁ = (2n+1)/z · jₙ - jₙ₊₁; buf[k] holds jₖ₋₁(z) (unnormalised).
+            buf[n] = (Float64(2n + 1) / z) * buf[n + 1] - buf[n + 2]
+        end
+        # Normalise using the exact j₀(z) = sin(z)/z.
+        scale = (sin(z) / z) / buf[1]
+        for n in 1:(nmax + 1)
+            buf[n] *= scale
+        end
     end
+    return
 end
 
 # ─────────────────────────────────────────────────────────────
@@ -467,7 +490,10 @@ end
 #
 # Caller must pre-allocate:
 #   ephim_buf : Vector{ComplexF64}, length ≥ 2*wmax_global+1
-#   fn_buf    : Vector{ComplexF64}, length ≥ wmax_global+1   (Hankel or Bessel)
+#   fn_buf    : Vector{ComplexF64}, length ≥ wmax_global+18  (17 scratch slots
+#               are used by Miller-downward jₙ recurrence in _bessel_upward!;
+#               _hankel_upward! only needs wmax_global+1, but the +18 contract
+#               is uniform for both)
 #   ymn_buf   : Matrix{Float64},   size (2*wmax_global+1, wmax_global+1)
 #   fywt_buf  : Matrix{ComplexF64}, size (2*wmax_global+1, wmax_global+1)
 # where wmax_global = nmax_s + nmax_t.
