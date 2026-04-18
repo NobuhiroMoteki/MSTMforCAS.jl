@@ -236,7 +236,9 @@ function _apply_A!(
 
     # Pre-allocate work buffers once (reused for every pair)
     ephim_buf = Vector{ComplexF64}(undef, 2*wmax_global + 1)
-    fn_buf    = Vector{ComplexF64}(undef, wmax_global + 1)
+    # +17 scratch for Miller-downward jₙ(z) recurrence seeds + margin
+    # (see _bessel_upward! in TranslationCoefs.jl).
+    fn_buf    = Vector{ComplexF64}(undef, wmax_global + 18)
     ymn_buf   = Matrix{Float64}(undef, 2*wmax_global + 1, wmax_global + 1)
     fywt_buf  = Matrix{ComplexF64}(undef, 2*wmax_global + 1, wmax_global + 1)
     r_ij      = Vector{Float64}(undef, 3)
