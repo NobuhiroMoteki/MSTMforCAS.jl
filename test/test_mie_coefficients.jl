@@ -122,4 +122,55 @@ using MSTMforCAS
         @test abs(a[1]) > 100 * abs(b[1])
     end
 
+    @testset "Miller ψ_n recurrence: stability at small x (Au doublet regression)" begin
+        # Regression for block-VIEM.jl doublet benchmark (Au @ 638 nm):
+        # pre-fix, the upward ψ_n recurrence blew up at n ≥ 7 for x ≈ 0.3,
+        # causing |S_fw| to jump by 4 orders of magnitude at truncation N ≥ 7.
+        # The Miller downward algorithm restores stability at all n.
+        x = 2π * 0.030 / 0.638           # ≈ 0.2954
+        m_Au = ComplexF64(0.17525, 3.4830)
+        a, b = compute_mie_coefficients(x, m_Au; nmax = 8)
+
+        @test all(isfinite, a)
+        @test all(isfinite, b)
+
+        # |a_n| and |b_n| must decrease monotonically across the full range
+        # (the dominant-dipole regime for x ≪ 1 — geometric decay ~(x/n)^{2n+1}).
+        for n in 1:7
+            @test abs(a[n+1]) < abs(a[n])
+            @test abs(b[n+1]) < abs(b[n])
+        end
+
+        # Leading-order Rayleigh limit: a_1 ≈ -(2i/3)·x³·(m²−1)/(m²+2)
+        # Finite-x correction is O(x²) ≈ 9% at x = 0.3, so use rtol = 0.1.
+        rayleigh_a1 = -(2im / 3) * x^3 * (m_Au^2 - 1) / (m_Au^2 + 2)
+        @test isapprox(a[1], rayleigh_a1; rtol = 0.1)
+    end
+
+    @testset "Backward compatibility: upward-stable regime (x = 5, m = 1.33)" begin
+        # Frozen reference values from the pre-Miller upward implementation
+        # at x = 5, m = 1.33+0.0i, for n = 1..5 (within the upward-stable range).
+        # New Miller implementation must agree to ≈ machine ε.
+        a, b = compute_mie_coefficients(5.0, ComplexF64(1.33, 0.0))
+
+        a_ref = [
+            0.9935773889533813 - 0.0798834220221105im,
+            0.9990447142202481 + 0.030892931373226948im,
+            0.924737697749646  - 0.26381411658652815im,
+            0.6572360464210308 - 0.4746333592425667im,
+            0.11754010119253813 - 0.32206276687035096im,
+        ]
+        b_ref = [
+            0.9722365577931019 + 0.1642943501272098im,
+            0.9424418611622516 - 0.23290598852602068im,
+            0.9829973454561133 - 0.129280950964742im,
+            0.8890023560981505 - 0.314129220146881im,
+            0.05967562409175904 - 0.23688487495198612im,
+        ]
+        for n in 1:5
+            @test isapprox(a[n], a_ref[n]; rtol = 1e-12)
+            @test isapprox(b[n], b_ref[n]; rtol = 1e-12)
+        end
+    end
+
 end
