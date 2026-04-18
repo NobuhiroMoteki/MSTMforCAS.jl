@@ -436,9 +436,12 @@ function solve_tmatrix(
     neqns = offsets[N] + nblks[N]
 
     # ── Step 2: Mie coefficients + precomputed T-matrix values ──────────────
+    # Size each Mie vector to nois[i]: the user-supplied truncation_order can
+    # exceed the Wiscombe default mie_nmax(radii[i]), and _precompute_T_values
+    # will then index a_v[n], b_v[n] up to nois[i].
     mie_vecs = Vector{Tuple{Vector{ComplexF64}, Vector{ComplexF64}}}(undef, N)
     for i in 1:N
-        mie_vecs[i] = compute_mie_coefficients(radii[i], m_rel)
+        mie_vecs[i] = compute_mie_coefficients(radii[i], m_rel; nmax = nois[i])
     end
     mn_to_n = _build_mn_to_n(maximum(nois))
     t_diag_vecs, t_off_vecs = _precompute_T_values(mie_vecs, nois)

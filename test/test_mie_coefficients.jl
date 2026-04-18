@@ -147,6 +147,33 @@ using MSTMforCAS
         @test isapprox(a[1], rayleigh_a1; rtol = 0.1)
     end
 
+    @testset "solve_tmatrix with truncation_order > mie_nmax(x) (Au doublet)" begin
+        # Regression: mie_vecs[i] was sized by compute_mie_coefficients'
+        # default nmax = mie_nmax(radii[i]) (Wiscombe upper bound ≈ 8 at
+        # x ≈ 0.3), ignoring the user-supplied truncation_order stored in
+        # nois[i].  _precompute_T_values then indexed a_v[n], b_v[n] past
+        # the end of the 8-element vectors for any truncation_order ≥ 9,
+        # raising a BoundsError.  Fix: size Mie vectors to nois[i].
+        k = 2π / 0.638                    # medium wavenumber, μm⁻¹
+        R = 0.030                         # monomer radius, μm
+        d = 2R + 0.003                    # centre-to-centre separation
+        positions = [0.0 0.0; 0.0 0.0; -d/2 +d/2]
+        radii     = [R, R]
+        m_rel     = ComplexF64(0.17525, 3.4830)  # Au @ 638 nm
+
+        positions_x = positions .* k
+        radii_x     = radii     .* k
+
+        for N in (3, 5, 8, 10, 15)
+            result, _ = compute_scattering(
+                positions_x, radii_x, m_rel;
+                truncation_order = N, tol = 1e-10)
+            @test result.converged
+            @test all(isfinite, result.S_forward)
+            @test isfinite(result.Q_ext)
+        end
+    end
+
     @testset "Backward compatibility: upward-stable regime (x = 5, m = 1.33)" begin
         # Frozen reference values from the pre-Miller upward implementation
         # at x = 5, m = 1.33+0.0i, for n = 1..5 (within the upward-stable range).
