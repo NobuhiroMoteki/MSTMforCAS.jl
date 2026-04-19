@@ -1,5 +1,7 @@
 # MSTMforCAS.jl
 
+[![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FNobuhiroMoteki%2FMSTMforCAS.jl%2Fmaster%2FProject.toml&query=version&label=version&prefix=v&color=blue)](Project.toml)
+
 Julia implementation of the Multi-Sphere T-Matrix (MSTM) method, specialized for Complex Amplitude Sensing (CAS) applications.
 
 ## Purpose
@@ -8,7 +10,7 @@ Compute numerically exact light scattering solutions for particles consisting of
 
 Reference implementation: [MSTM-v4.0_for_CAS](https://github.com/NobuhiroMoteki/MSTM-v4.0_for_CAS) (Fortran/MPI).
 
-For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie coefficients, translation addition theorem, multi-sphere interaction equation, CBICG solver, and output quantities), see [docs/technical_note_mstm_theory.pdf](docs/technical_note_mstm_theory.pdf).
+For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie coefficients, translation addition theorem, multi-sphere interaction equation, CBICG solver, and output quantities), see [docs/theory_note.pdf](docs/theory_note.pdf).
 
 ## Physical Scope
 
@@ -51,7 +53,7 @@ where $C$ is the cross section and $R_{\rm ve}$ is the volume-equivalent sphere 
 ### From GitHub (new machine)
 
 ```bash
-git clone https://github.com/MOTEKI-LAB/MSTMforCAS.jl.git
+git clone https://github.com/NobuhiroMoteki/MSTMforCAS.jl.git
 cd MSTMforCAS.jl
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ```
@@ -243,79 +245,6 @@ aggregates = [read_aggregate_file(f) for f in readdir("aggregates/", join=true)]
 run_parameter_sweep(aggregates, config; output_h5="results.h5")
 ```
 
-### Doublet orientation sweep (PS calibration)
-
-For the polystyrene (PS) two-sphere doublet calibration pipeline
-([PCAS_Bayes_PSstandard_doublet](https://github.com/MOTEKI-LAB/PCAS_Bayes_PSstandard_doublet)),
-a dedicated script `scripts/run_doublet_sweep.jl` constructs contact
-doublet geometries and sweeps over the four-dimensional parameter space
-$(r_v,\, q,\, \cos\theta_o,\, \phi_o)$, where:
-
-- $r_v$ = volume-equivalent radius [μm]
-- $q = r_2/r_1 \in [0.9, 1.0]$ = radius ratio
-- $\cos\theta_o \in [-1, 1]$ = cosine of optical-frame polar angle (full domain, no mirroring)
-- $\phi_o \in [0, 2\pi)$ = optical-frame azimuthal angle
-
-Unlike `run_sweep_h5.jl` (which sweeps over refractive indices for fixed
-geometries), this script generates doublet geometries on the fly and
-rotates them to the requested orientation before calling
-`compute_scattering()`. The PS refractive index is fixed per wavelength.
-
-**Usage:**
-
-```bash
-# Required: --wavelength [μm] and --nominal-diameter [nm]
-julia -t auto --project=. scripts/run_doublet_sweep.jl \
-    --wavelength 0.638 --nominal-diameter 303
-
-# Override grid resolution (defaults: n_rv=20, n_q=6, n_ct=21, n_phi=20)
-julia -t auto --project=. scripts/run_doublet_sweep.jl \
-    --wavelength 0.834 --nominal-diameter 510 \
-    --n-rv 25 --n-q 8 --n-ct 25 --n-phi 24
-```
-
-**Supported wavelengths and nominal diameters** (PS, from
-Thermo Fisher Nanosphere standards):
-
-- Wavelengths: 0.453, 0.638, 0.834 μm
-- Nominal single-sphere diameters: 240, 303, 345, 401, 453, 510, 600,
-  702, 803, 994 nm
-
-The $r_v$ grid range is auto-computed from the nominal diameter and the
-manufacturer's size distribution $\sigma_p$ (extended by
-$\pm 7\sigma_{r_v}$).
-
-**Default output location:** the HDF5 is written directly into the
-companion Python project's data directory:
-```
-~/Python_in_WSL/PCAS_Bayes_PSstandard_doublet/data/wl_{wl}nm/doublet_sweep_wl{wl}nm_PS_{d}nm.h5
-```
-Use `--output PATH` to override.
-
-**Output HDF5 schema:**
-
-| Attribute | Description |
-|---|---|
-| `wavelength` | vacuum wavelength [μm] |
-| `medium_refindex` | refractive index of medium (1.0 = air) |
-| `m_real_PS`, `m_imag_PS` | PS refractive index |
-| `nominal_diameter_nm` | single-sphere nominal diameter [nm] |
-| `rv_min`, `rv_max`, `n_rv` | r_v grid spec |
-| `q_min`, `q_max`, `n_q` | q grid spec |
-| `ct_min`, `ct_max`, `n_ct` | cos(theta_o) grid spec |
-| `n_phi` | number of phi_o grid points |
-
-| Dataset | Shape | Description |
-|---|---|---|
-| `r_v_grid`, `q_grid`, `cos_theta_opt_grid`, `phi_opt_grid` | 1D | grid coordinates |
-| `r_v`, `q`, `cos_theta_opt`, `phi_opt` | flat 1D, length $n_{rv} \cdot n_q \cdot n_{ct} \cdot n_\phi$ | parameter values per grid point (row-major) |
-| `S_s_re`, `S_s_im`, `S_p_re`, `S_p_im` | flat 1D | CAS-v2 observables: $S_s = S_{11} + iS_{12}$, $S_p = S_{22} - iS_{21}$ |
-| `converged` | flat 1D, Int8 | convergence flag (1 = converged) |
-
-The output is consumed by `lut_generation/build_doublet_lut.py` in the
-Python project to construct a 4D natural cubic spline LUT for Bayesian
-inference.
-
 ### Output data format
 
 Results are stored in HDF5 format. Each column is a 1-D dataset of length equal to the number of completed jobs. There are 51 columns per row (one row = one aggregate × medium_condition × refractive_index combination):
@@ -496,7 +425,7 @@ MSTMforCAS.jl/
 │   ├── read_results_h5.jl     # Read and summarize HDF5 output
 │   └── read_results_h5_for_cas.jl  # CAS-specific parameter lookup from HDF5
 ├── docs/
-│   ├── technical_note_mstm_theory.md              # Mathematical formulation of MSTM theory
+│   ├── theory_note.md              # Mathematical formulation of MSTM theory
 │   └── technical_note_use_results_from_python.md  # Python reader guide + code
 └── test/
 ```

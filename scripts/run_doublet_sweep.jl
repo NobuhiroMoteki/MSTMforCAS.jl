@@ -12,8 +12,18 @@ Usage:
     julia -t auto --project=. scripts/run_doublet_sweep.jl \\
         --wavelength 0.638 --nominal-diameter 303 \\
         [--output doublet_sweep_wl638nm_PS_303nm.h5] \\
+        [--output-dir DIR] \\
         [--n-rv 20] [--n-q 6] [--n-ct 16] [--n-phi 20] \\
         [--use-fft] [--gpu]
+
+Output path resolution (first match wins):
+  1. --output PATH             : full HDF5 file path (overrides everything)
+  2. --output-dir DIR          : base directory; filename auto-generated
+  3. env DOUBLET_OUTPUT_DIR    : same as --output-dir
+  4. default                   : ./doublet_sweep_output/
+
+When a directory is used, the file is written to:
+  {dir}/wl_{wl}nm/doublet_sweep_wl{wl}nm_PS_{d}nm.h5
 
 The r_v grid range is automatically computed from the nominal diameter
 and the particle size distribution sigma_p.
@@ -28,8 +38,8 @@ using LinearAlgebra
 using Printf
 
 # =========================================================================
-# PS refractive index table (same as PCAS_Bayes_PSstandard/config.py)
-# Zhang et al., Appl. Opt. 59, 2337-2344 (2020)
+# PS refractive index table
+# Source: Zhang et al., Appl. Opt. 59, 2337-2344 (2020)
 # =========================================================================
 const PS_REFINDEX = Dict(
     0.453 => 1.610,
@@ -382,6 +392,7 @@ function main()
     wavelength = 0.638
     nominal_diameter_nm = 0  # required
     output_h5 = nothing
+    output_dir = nothing
     n_rv = N_RV_DEFAULT
     n_q = N_Q_DEFAULT
     n_ct = N_CT_DEFAULT
@@ -401,6 +412,9 @@ function main()
         elseif arg == "--output"
             i += 1
             output_h5 = ARGS[i]
+        elseif arg == "--output-dir"
+            i += 1
+            output_dir = ARGS[i]
         elseif arg == "--n-rv"
             i += 1
             n_rv = parse(Int, ARGS[i])
@@ -433,10 +447,9 @@ function main()
 
     if output_h5 === nothing
         wl_nm = round(Int, wavelength * 1000)
-        # Output directly to the doublet project's data directory
-        doublet_project = expanduser(
-            "~/Python_in_WSL/PCAS_Bayes_PSstandard_doublet")
-        output_h5 = joinpath(doublet_project, "data", "wl_$(wl_nm)nm",
+        base_dir = output_dir !== nothing ? output_dir :
+                   get(ENV, "DOUBLET_OUTPUT_DIR", "./doublet_sweep_output")
+        output_h5 = joinpath(expanduser(base_dir), "wl_$(wl_nm)nm",
                              "doublet_sweep_wl$(wl_nm)nm_PS_$(nominal_diameter_nm)nm.h5")
     end
 
