@@ -50,6 +50,8 @@ where $C$ is the cross section and $R_{\rm ve}$ is the volume-equivalent sphere 
 
 ## Installation
 
+For full from-scratch setup instructions on **Windows (WSL2 + Ubuntu)** and **native Linux (Ubuntu)**, see [docs/installation_guide.md](docs/installation_guide.md). The summary below assumes Julia ≥ 1.10 and a working build toolchain are already in place.
+
 ### From GitHub (new machine)
 
 ```bash
