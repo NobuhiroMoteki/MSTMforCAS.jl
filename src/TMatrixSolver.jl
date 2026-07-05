@@ -412,10 +412,17 @@ function solve_tmatrix(
     truncation_order::Union{Int,Nothing} = nothing,
     precomputed_fft::Union{FFTGridData, Nothing} = nothing,
     solver::Symbol = :cbicg,
-    initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
+    initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing,
+    rhs_ext::Union{Nothing, Matrix{ComplexF64}} = nothing
 )::Tuple{Matrix{ComplexF64}, Bool, Int, Int, Vector{Int}, Vector{Int}, Vector{Int}, Matrix{ComplexF64}}
 
     N = length(radii)
+    # rhs_ext (custom incident coefficients, neqns×Ncol) drives an arbitrary set
+    # of right-hand sides — used to assemble the cluster T-matrix (design phase
+    # P2). The FFT translation buffers are hardwired to width 2, so custom RHS
+    # currently requires the direct A path (use_fft=false); this is lifted in P3.
+    rhs_ext === nothing || !use_fft ||
+        error("rhs_ext requires use_fft=false (FFT buffers hardwired to width 2 until P3)")
     @assert size(positions, 1) == 3
     @assert size(positions, 2) == N
 
@@ -456,26 +463,32 @@ function solve_tmatrix(
     # Find nmax overall for p0 array (each sphere uses its own noi)
     # We generate p0 per sphere with that sphere's noi, then place into global vector.
 
-    rhs = zeros(ComplexF64, neqns, 2)  # rhs[:,q] = incident coefficients for pol q
+    if rhs_ext === nothing
+        rhs = zeros(ComplexF64, neqns, 2)  # rhs[:,q] = incident coefficients for pol q
 
-    for i in 1:N
-        noi  = nois[i]
-        hnb  = half_nblks[i]
-        off  = offsets[i]
-        z_i  = positions[3, i]
-        phase = exp(im * z_i)
+        for i in 1:N
+            noi  = nois[i]
+            hnb  = half_nblks[i]
+            off  = offsets[i]
+            z_i  = positions[3, i]
+            phase = exp(im * z_i)
 
-        p0_i = _genplanewavecoef_z0(noi)  # (hnb, 2, 2)
+            p0_i = _genplanewavecoef_z0(noi)  # (hnb, 2, 2)
 
-        for q in 1:2
-            for p in 1:2
-                p_blk_off = (p - 1) * hnb
-                for mn in 1:hnb
-                    rhs[off + p_blk_off + mn, q] += phase * p0_i[mn, p, q]
+            for q in 1:2
+                for p in 1:2
+                    p_blk_off = (p - 1) * hnb
+                    for mn in 1:hnb
+                        rhs[off + p_blk_off + mn, q] += phase * p0_i[mn, p, q]
+                    end
                 end
             end
         end
+    else
+        @assert size(rhs_ext, 1) == neqns "rhs_ext must have neqns rows"
+        rhs = rhs_ext
     end
+    Ncol = size(rhs, 2)
 
     # ── Step 5: Build operator functions ────────────────────────────────────
 
@@ -553,16 +566,16 @@ function solve_tmatrix(
     end
 
     # ── Step 6: Apply T to incident RHS: actual RHS = T * p_inc ─────────────
-    T_rhs = zeros(ComplexF64, neqns, 2)
-    for q in 1:2
+    T_rhs = zeros(ComplexF64, neqns, Ncol)
+    for q in 1:Ncol
         tmp_rhs_q = rhs[:, q]
         tmp_Trhs_q = zeros(ComplexF64, neqns)
         _apply_T!(tmp_Trhs_q, tmp_rhs_q, t_diag_vecs, t_off_vecs, mn_to_n, offsets, half_nblks)
         T_rhs[:, q] .= tmp_Trhs_q
     end
 
-    # ── Step 7: Solve for each polarization ─────────────────────────────────
-    amn = zeros(ComplexF64, neqns, 2)
+    # ── Step 7: Solve for each right-hand side ──────────────────────────────
+    amn = zeros(ComplexF64, neqns, Ncol)
     converged_both = true
     n_iter_max = 0
 
@@ -573,7 +586,7 @@ function solve_tmatrix(
         # GMRES via Krylov.jl — only needs forward operator apply_L!, no adjoint
         opL = LinearOperator(ComplexF64, neqns, neqns, false, false,
                              (y, v) -> apply_L!(y, v))
-        for q in 1:2
+        for q in 1:Ncol
             p_vec = T_rhs[:, q]
             if real(dot(p_vec, p_vec)) == 0.0
                 amn[:, q] .= zero(ComplexF64)
@@ -591,7 +604,7 @@ function solve_tmatrix(
             n_iter_max      = max(n_iter_max, stats.niter)
         end
     elseif solver == :cbicg
-        for q in 1:2
+        for q in 1:Ncol
             p_vec    = T_rhs[:, q]
             norm2_p  = real(dot(p_vec, p_vec))
             if norm2_p == 0.0
