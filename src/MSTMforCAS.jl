@@ -30,6 +30,7 @@ using Krylov
 using LinearOperators
 
 # Sub-modules — loaded in dependency order
+include("WignerRotation.jl")
 include("MieCoefficients.jl")
 include("TranslationCoefs.jl")
 include("FFTTranslation.jl")
