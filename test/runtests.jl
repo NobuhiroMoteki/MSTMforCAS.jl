@@ -5,6 +5,8 @@ using MSTMforCAS
     include("test_mie_coefficients.jl")
     include("test_wigner_rotation.jl")     # Wigner-D kernel (design P1)
     include("test_cluster_tmatrix.jl")     # cluster T-matrix + rotation (design P2)
+    include("test_truncation_order.jl")    # truncation order for near-touching monomers
+    include("test_parameter_sweep.jl")     # sweep wiring of truncation_eps
     # include("test_translation_coefs.jl")   # uncomment as implemented
     # include("test_tmatrix_solver.jl")
     # include("test_scattering_amplitude.jl")

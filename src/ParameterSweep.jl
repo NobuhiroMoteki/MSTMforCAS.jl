@@ -52,6 +52,14 @@ Configuration for a parameter sweep computation.
 - `convergence_epsilon::Float64`: Solver convergence threshold (default 1e-6)
 - `use_fft::Bool`: Use FFT-accelerated translation (default false)
 - `truncation_order::Union{Int,Nothing}`: Override VSWF truncation order (default nothing = auto)
+- `truncation_eps::Union{Float64,Nothing}`: Target relative accuracy of the forward amplitudes
+  S₁(0°), S₂(0°) with respect to the VSWF truncation order (default nothing = single-sphere
+  Mie criterion only, the behaviour of earlier versions). When set, the truncation order is
+  chosen for every refractive index by `contact_truncation_order`, a preliminary two-sphere
+  calculation that resolves the coupling between touching monomers. Suggested values:
+  `1e-2` for routine use, `1e-3` for precise calculations. Each sphere uses the larger of this
+  order, its own Mie order and `truncation_order`. On the GPU path all refractive indices of a
+  batch share the largest order of the batch.
 - `use_gpu::Bool`: Use GPU-accelerated batched solver via CUDA.jl extension (default false).
   Requires `using CUDA` before calling `run_parameter_sweep`. Implies `use_fft=true`.
 - `gpu_float32::Bool`: Use Float32 precision for GPU BiCG iterations (default false).
@@ -66,6 +74,7 @@ Base.@kwdef struct SweepConfig
     convergence_epsilon::Float64 = 1e-6
     use_fft::Bool            = false
     truncation_order::Union{Int,Nothing} = nothing
+    truncation_eps::Union{Float64,Nothing} = nothing
     solver::Symbol           = :cbicg   # :cbicg or :gmres
     use_gpu::Bool            = false
     gpu_float32::Bool        = false
@@ -169,6 +178,9 @@ function _h5_init!(path::String, config::SweepConfig)
         HDF5.attrs(fid)["medium_conditions_refindex"]   = nmed_vals
         HDF5.attrs(fid)["m_real_range"] = Float64[config.m_real_range...]
         HDF5.attrs(fid)["m_imag_range"] = Float64[config.m_imag_range...]
+        # NaN = truncation order from the single-sphere Mie criterion only
+        HDF5.attrs(fid)["truncation_eps"] =
+            config.truncation_eps === nothing ? NaN : config.truncation_eps
 
         for (col, T) in _SWEEP_COLS
             HDF5.create_dataset(fid, col, HDF5.datatype(T),
@@ -242,6 +254,62 @@ function compute_scattering(
 end
 
 # ─────────────────────────────────────────────────────────────
+# Truncation order from the two-sphere preliminary calculation
+# ─────────────────────────────────────────────────────────────
+
+"""
+    _x_bucket(agg::AggregateGeometry, k::Float64) -> Float64
+
+Mean monomer size parameter of an aggregate, rounded to two significant digits.
+The contact truncation order depends only weakly on the size parameter, so
+aggregates with nearly equal mean monomer size share one preliminary calculation.
+"""
+function _x_bucket(agg::AggregateGeometry, k::Float64)::Float64
+    return round(k * sum(agg.radii) / length(agg.radii); sigdigits = 2)
+end
+
+"""
+    _build_contact_order_table(keys, eps) -> Dict{Tuple{Float64,ComplexF64},Int}
+
+Run the two-sphere preliminary calculation (`contact_truncation_order`) for every
+(mean size parameter, relative refractive index) pair in `keys`, in parallel.
+"""
+function _build_contact_order_table(
+    keys::Vector{Tuple{Float64,ComplexF64}},
+    eps::Float64
+)::Dict{Tuple{Float64,ComplexF64},Int}
+    isempty(keys) && return Dict{Tuple{Float64,ComplexF64},Int}()
+    # Largest |m| first: it needs the highest order. Running it alone grows the lazily
+    # built translation-coefficient caches before the threaded loop starts.
+    sorted = sort(keys; by = key -> -abs(key[2]))
+    orders = Vector{Int}(undef, length(sorted))
+    orders[1] = contact_truncation_order(sorted[1][1], sorted[1][2]; eps = eps)
+    Threads.@threads :dynamic for i in 2:length(sorted)
+        x, m_rel = sorted[i]
+        orders[i] = contact_truncation_order(x, m_rel; eps = eps)
+    end
+    return Dict(zip(sorted, orders))
+end
+
+"""
+    _read_truncation_eps(path::String) -> Union{Float64,Nothing}
+
+`truncation_eps` recorded in an existing results file. Files written before this
+attribute existed used the single-sphere Mie criterion, which is reported as `nothing`.
+"""
+function _read_truncation_eps(path::String)::Union{Float64,Nothing}
+    return HDF5.h5open(path, "r") do fid
+        a = HDF5.attrs(fid)
+        if haskey(a, "truncation_eps")
+            v = Float64(a["truncation_eps"])
+            isnan(v) ? nothing : v
+        else
+            nothing
+        end
+    end
+end
+
+# ─────────────────────────────────────────────────────────────
 # Main sweep function
 # ─────────────────────────────────────────────────────────────
 
@@ -293,6 +361,12 @@ function run_parameter_sweep(
     completed_keys = Set{Tuple{String, Float64, Float64, Float64, Float64}}()
 
     if output_h5 !== nothing && isfile(output_h5)
+        # Rows computed with different truncation settings must not share a file.
+        eps_file = _read_truncation_eps(output_h5)
+        isequal(eps_file, config.truncation_eps) || error(
+            "$(basename(output_h5)) was written with truncation_eps = $(repr(eps_file)), " *
+            "but this sweep uses truncation_eps = $(repr(config.truncation_eps)). " *
+            "Use a different output file.")
         HDF5.h5open(output_h5, "r") do fid
             if haskey(fid, "source") && size(fid["source"], 1) > 0
                 sources  = read(fid["source"])
@@ -345,6 +419,33 @@ function run_parameter_sweep(
         _h5_init!(output_h5, config)
     end
 
+    # ── Truncation order per refractive index (two-sphere preliminary calculation) ──
+    # order_table[(x_bucket, m_rel)] = contact truncation order; empty if truncation_eps is unset.
+    order_table = Dict{Tuple{Float64,ComplexF64},Int}()
+    if config.truncation_eps !== nothing
+        key_set = Set{Tuple{Float64,ComplexF64}}()
+        for ((ai, mci), mis) in group_list
+            wl, n_med = config.medium_conditions[mci]
+            xb = _x_bucket(aggregates[ai], 2π * n_med / wl)
+            for mi in mis
+                push!(key_set, (xb, ri_grid[mi] / n_med))
+            end
+        end
+        t_tab = time()
+        order_table = _build_contact_order_table(collect(key_set), config.truncation_eps)
+        @info @sprintf("Truncation orders for truncation_eps = %.1e: %d preliminary two-sphere calculations in %.0f s, orders %d to %d",
+                       config.truncation_eps, length(order_table), time() - t_tab,
+                       minimum(values(order_table)), maximum(values(order_table)))
+    end
+    # Truncation order passed to the solver for group (ai, mci) and refractive index mi.
+    # Each sphere still uses at least its own single-sphere Mie order.
+    _order_for = function (ai::Int, mci::Int, mi::Int)
+        config.truncation_eps === nothing && return config.truncation_order
+        wl, n_med = config.medium_conditions[mci]
+        o = order_table[(_x_bucket(aggregates[ai], 2π * n_med / wl), ri_grid[mi] / n_med)]
+        return config.truncation_order === nothing ? o : max(o, config.truncation_order)
+    end
+
     # ── Pre-warm global caches (single-threaded, must run before @threads) ──
     let (gk0, mis0) = group_list[1],
         (ai0, mci0) = gk0,
@@ -354,7 +455,7 @@ function run_parameter_sweep(
         m_rel0 = ri_grid[mis0[1]] / n_med0
         compute_scattering(agg0, m_rel0, k0;
             tol=config.convergence_epsilon, max_iter=config.max_iterations,
-            use_fft=effective_use_fft, truncation_order=config.truncation_order,
+            use_fft=effective_use_fft, truncation_order=_order_for(ai0, mci0, mis0[1]),
             solver=config.solver)  # returns (ScatteringResult, amn); result discarded
     end
 
@@ -407,8 +508,9 @@ function run_parameter_sweep(
                 m_rel_tmp = ri_grid[mi] / n_med
                 nois_tmp  = [mie_nmax(radii_x[s], m_rel_tmp) for s in 1:length(radii_x)]
                 noi_tmp   = maximum(nois_tmp)
-                if config.truncation_order !== nothing
-                    noi_tmp = max(noi_tmp, config.truncation_order)
+                order_tmp = _order_for(ai, mci, mi)
+                if order_tmp !== nothing
+                    noi_tmp = max(noi_tmp, order_tmp)
                 end
                 max_noi = max(max_noi, noi_tmp)
             end
@@ -518,10 +620,13 @@ function run_parameter_sweep(
                 # Force flush on last RI of each group to ensure progress display
                 _record_one!(r, ri_batch[ri_idx]; force_flush=(ri_idx == n_ri_in_group))
             end
+            # The batched solver uses one truncation order for the whole batch.
+            orders_batch = [_order_for(ai, mci, mi) for mi in mi_list]
+            order_gpu = any(isnothing, orders_batch) ? nothing : maximum(orders_batch)
             _gpu_batch_solve_ref[](
                 agg, k, ri_batch, n_med, fft_cache,
                 (tol=config.convergence_epsilon, max_iter=config.max_iterations,
-                 truncation_order=config.truncation_order,
+                 truncation_order=order_gpu,
                  float32=config.gpu_float32,
                  on_result=_on_gpu_result))
         else
@@ -532,7 +637,7 @@ function run_parameter_sweep(
                 m_rel   = m_abs / n_med
                 r, amn_out = compute_scattering(agg, m_rel, k;
                     tol=config.convergence_epsilon, max_iter=config.max_iterations,
-                    use_fft=effective_use_fft, truncation_order=config.truncation_order,
+                    use_fft=effective_use_fft, truncation_order=_order_for(ai, mci, mi),
                     precomputed_fft=fft_cache, solver=config.solver,
                     initial_amn=prev_amn)
                 prev_amn = amn_out
