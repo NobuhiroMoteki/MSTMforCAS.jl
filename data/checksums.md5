@@ -1,0 +1,13 @@
+# MSTM raw output checksums (md5)
+# Generated: 2026-08-27
+# Verify from this directory:  md5sum -c checksums.md5
+#
+# results_fullsweep_agg20260323_00.h5      : base sweep      (9,126,000 rows x 52 vars)
+# ..._extension.h5                         : extension sweep (3,744,000 rows x 52 vars)
+# ..._ext.h5                               : base + extension concatenated (12,870,000 rows)
+# aggregates_20260323_00.h5                : aggregate geometries (source for the sweeps)
+7e8f660ac2cf1ef9dbe5b726b03f099a  results/results_fullsweep_agg20260323_00.h5
+7e8f660ac2cf1ef9dbe5b726b03f099a  results/results_fullsweep_agg20260323_00.h5.bak
+536dcc3b22a1949637c08ec68502f17b  results/results_fullsweep_agg20260323_00_ext.h5
+9f080ef69ee10576ff4913de58aec9c2  results/results_fullsweep_agg20260323_00_extension.h5
+92b1f8cb1d824743b2658f64882a835a  aggregates/aggregates_20260323_00.h5
