@@ -14,6 +14,12 @@ Two refractive index grids are available (`--preset`):
       834 nm: m_real 1.65..2.55 (10) x m_imag 0.55..1.45 (10)
       638 nm: m_real 1.55..2.55 (11) x m_imag 0.55..1.55 (11)
       453 nm: m_real 1.35..2.25 (10) x m_imag 0.75..1.55 (9)
+- `ext`: the complement of `core` in a wider grid with the same step of 0.10. It adds the low
+  m_imag values down to 0.15 and one more column at the two edges where the published
+  posteriors come closest to the core window. `core` and `ext` together give
+      834 nm: m_real 1.65..2.65 (11) x m_imag 0.15..1.45 (14)
+      638 nm: m_real 1.55..2.55 (11) x m_imag 0.15..1.65 (16)
+      453 nm: m_real 1.35..2.25 (10) x m_imag 0.15..1.55 (15)
 - `full`: m_real 1.55..2.60 x m_imag 0.15..1.60 for all wavelengths, step `--ri-step`.
 
 Run with:
@@ -24,7 +30,7 @@ Options:
   --float32            : Float32 GPU iterations (implies --gpu)
   --truncation-order N : uniform VSWF truncation order, a lower bound for every sphere (default 3,
                          the order that the GPU rows of the original file used)
-  --preset core|full   : refractive index grid, see above (default core)
+  --preset core|ext|full : refractive index grid, see above (default core)
   --ri-step STEP       : with --preset full: 0.05 (default) = the 22 x 30 grid, 0.10 = every
                          second value (11 x 15). The coarse values are a subset of the fine
                          grid, so a later run with 0.05 into the same file adds the rest.
@@ -70,21 +76,28 @@ part_i, part_n = let p = _arg("--part", "1/1")
 end
 
 # ─── Refractive index grid per wavelength ────────────────────────────────────
-# ri_grids[wavelength in um] = ((m_real min, max, n), (m_imag min, max, n))
+# ri_grids[wavelength in um] = list of rectangles ((m_real min, max, n), (m_imag min, max, n))
 ri_grids =
     if preset == "core"
-        Dict(0.834 => ((1.65, 2.55, 10), (0.55, 1.45, 10)),
-             0.638 => ((1.55, 2.55, 11), (0.55, 1.55, 11)),
-             0.453 => ((1.35, 2.25, 10), (0.75, 1.55, 9)))
+        Dict(0.834 => [((1.65, 2.55, 10), (0.55, 1.45, 10))],
+             0.638 => [((1.55, 2.55, 11), (0.55, 1.55, 11))],
+             0.453 => [((1.35, 2.25, 10), (0.75, 1.55, 9))])
+    elseif preset == "ext"
+        Dict(0.834 => [((2.65, 2.65, 1), (0.55, 1.45, 10)),      # one more m_real column
+                       ((1.65, 2.65, 11), (0.15, 0.45, 4))],     # low m_imag block
+             0.638 => [((1.55, 2.55, 11), (1.65, 1.65, 1)),      # one more m_imag row
+                       ((1.55, 2.55, 11), (0.15, 0.45, 4))],
+             0.453 => [((1.35, 2.25, 10), (0.15, 0.65, 6))])
     elseif preset == "full"
         g = isapprox(ri_step, 0.05) ? ((1.55, 2.60, 22), (0.15, 1.60, 30)) :
             isapprox(ri_step, 0.10) ? ((1.55, 2.55, 11), (0.15, 1.55, 15)) :
             error("--ri-step must be 0.05 or 0.10")
-        Dict(0.834 => g, 0.638 => g, 0.453 => g)
+        Dict(0.834 => [g], 0.638 => [g], 0.453 => [g])
     else
-        error("--preset must be core or full")
+        error("--preset must be core, ext or full")
     end
 all(wl -> haskey(ri_grids, wl), wl_sel) || error("--wl values must be among 0.834, 0.638, 0.453")
+n_ri(wl) = sum(r[1][3] * r[2][3] for r in ri_grids[wl])
 
 # ─── Aggregate data files ────────────────────────────────────────────────────
 agg_dir  = joinpath(@__DIR__, "..", "data", "aggregates")
@@ -117,13 +130,12 @@ println()
 # ─── Run one sweep per wavelength ────────────────────────────────────────────
 println("Preset: $preset, threads: $(Threads.nthreads()), use_gpu: $use_gpu, gpu_float32: $gpu_float32, " *
         "truncation_order: $truncation_order")
-n_total = sum(length(aggregates) * ri_grids[wl][1][3] * ri_grids[wl][2][3] for wl in wl_sel)
+n_total = sum(length(aggregates) * n_ri(wl) for wl in wl_sel)
 println("Total jobs: $n_total")
 println()
 
 t0 = time()
-for wl in wl_sel
-    m_real_range, m_imag_range = ri_grids[wl]
+for wl in wl_sel, (m_real_range, m_imag_range) in ri_grids[wl]
     config = SweepConfig(
         medium_conditions = [(wl, 1.0)],          # (wavelength [μm], n_medium)
         m_real_range = m_real_range,
@@ -136,9 +148,9 @@ for wl in wl_sel
         gpu_float32         = gpu_float32,
         gpu_np_threshold    = 500,
     )
-    n_ri = m_real_range[3] * m_imag_range[3]
+    n_rect = m_real_range[3] * m_imag_range[3]
     @printf("=== wavelength %.3f um: m_real %s × m_imag %s → %d RI values, %d jobs ===\n",
-            wl, string(m_real_range), string(m_imag_range), n_ri, length(aggregates) * n_ri)
+            wl, string(m_real_range), string(m_imag_range), n_rect, length(aggregates) * n_rect)
     run_parameter_sweep(aggregates, config; output_h5=output_h5)
 end
 @printf("Done in %.1f s\nResults saved to: %s\n", time() - t0, output_h5)
