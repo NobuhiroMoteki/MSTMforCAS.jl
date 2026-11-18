@@ -509,6 +509,8 @@ Thread safety: the translation coefficient cache is pre-warmed single-threaded b
 
 ### GPU-accelerated batched solver with hybrid CPU parallelism (v0.4.1)
 
+> **Correction (2026-11-18).** Up to commit `40da716` the GPU path applied the Mie T-matrix of the first sphere to every sphere in the iteration operator. Results were correct only for aggregates of equal spheres. For monomer radii with a relative standard deviation of 0.1, the forward amplitudes of single aggregates were off by 5–20 %. The CPU path was not affected. The GPU path now uses the T-matrix of each sphere. Results computed with `use_gpu = true` before this correction for aggregates of unequal spheres should be recomputed.
+
 The GPU solver processes multiple refractive index values simultaneously on a single GPU device, exploiting the fact that the translation operator $\mathbf{A}$ depends only on geometry and is shared across all RI values in a group. A hybrid mode runs CPU threads concurrently with the GPU to maximise hardware utilisation.
 
 ```bash

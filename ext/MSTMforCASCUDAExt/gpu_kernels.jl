@@ -6,7 +6,8 @@ Uniform noi_max is assumed across all spheres (padded to hnb_max = noi_max*(noi_
 """
 
 # ─────────────────────────────────────────────────────────────
-# T-matrix application: out = T * inp  (block-diagonal, per-RI)
+# T-matrix application: out = T * inp  (block-diagonal, per sphere and per RI)
+# t_diag, t_off have shape (noi_max, N, B): every sphere has its own Mie coefficients.
 # ─────────────────────────────────────────────────────────────
 
 function gpu_apply_T_batch_kernel!(
@@ -47,8 +48,8 @@ function gpu_apply_T_batch_kernel!(
             end
         end
 
-        td = t_diag[n, b]
-        to = t_off[n, b]
+        td = t_diag[n, i, b]
+        to = t_off[n, i, b]
         p1 = inp[off + mn, b]
         p2 = inp[off + hnb_max + mn, b]
         out[off + mn, b]           = td * p1 + to * p2
@@ -90,8 +91,8 @@ function gpu_apply_T_batch_kernel_v2!(
     off = (i - 1) * blk_size
 
     n  = mn_to_n[mn]
-    td = t_diag[n, b]
-    to = t_off[n, b]
+    td = t_diag[n, i, b]
+    to = t_off[n, i, b]
     p1 = inp[off + mn, b]
     p2 = inp[off + hnb_max + mn, b]
     out[off + mn, b]           = td * p1 + to * p2
