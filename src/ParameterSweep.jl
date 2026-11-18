@@ -60,6 +60,15 @@ Configuration for a parameter sweep computation.
   `1e-2` for routine use, `1e-3` for precise calculations. Each sphere uses the larger of this
   order, its own Mie order and `truncation_order`. On the GPU path all refractive indices of a
   batch share the largest order of the batch.
+- `fft_far_order::Union{Int,Nothing}`: Multipole order that the FFT grid carries (default
+  nothing = all orders of every sphere, the behaviour of earlier versions). An integer `F`
+  limits the grid to the order `max(F, Mie order)`, where the Mie order is the largest
+  single-sphere Mie order of the aggregate over the refractive index grid. `F = 0` selects
+  that Mie order. Orders above it then couple near pairs only, by direct translation (see
+  `init_fft_grid`). This keeps the memory and the time of the FFT part independent of the
+  orders that `truncation_eps` or `truncation_order` add.
+- `fft_near_factor::Float64`: Near-pair criterion for `fft_far_order` (default 1.5). Spheres
+  are a near pair if their center distance is at most this factor times the sum of their radii.
 - `use_gpu::Bool`: Use GPU-accelerated batched solver via CUDA.jl extension (default false).
   Requires `using CUDA` before calling `run_parameter_sweep`. Implies `use_fft=true`.
 - `gpu_float32::Bool`: Use Float32 precision for GPU BiCG iterations (default false).
@@ -75,6 +84,8 @@ Base.@kwdef struct SweepConfig
     use_fft::Bool            = false
     truncation_order::Union{Int,Nothing} = nothing
     truncation_eps::Union{Float64,Nothing} = nothing
+    fft_far_order::Union{Int,Nothing} = nothing
+    fft_near_factor::Float64 = 1.5
     solver::Symbol           = :cbicg   # :cbicg or :gmres
     use_gpu::Bool            = false
     gpu_float32::Bool        = false
@@ -181,6 +192,10 @@ function _h5_init!(path::String, config::SweepConfig)
         # NaN = truncation order from the single-sphere Mie criterion only
         HDF5.attrs(fid)["truncation_eps"] =
             config.truncation_eps === nothing ? NaN : config.truncation_eps
+        # -1 = the FFT grid carries all orders of every sphere
+        HDF5.attrs(fid)["fft_far_order"] =
+            config.fft_far_order === nothing ? -1 : config.fft_far_order
+        HDF5.attrs(fid)["fft_near_factor"] = config.fft_near_factor
 
         for (col, T) in _SWEEP_COLS
             HDF5.create_dataset(fid, col, HDF5.datatype(T),
@@ -243,14 +258,17 @@ function compute_scattering(
     truncation_order::Union{Int,Nothing} = nothing,
     precomputed_fft::Union{FFTGridData, Nothing} = nothing,
     solver::Symbol = :cbicg,
-    initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
+    initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing,
+    fft_far_order::Union{Int,Nothing} = nothing,
+    fft_near_factor::Float64 = 1.5
 )::Tuple{ScatteringResult, Matrix{ComplexF64}}
     positions_x = agg.positions .* k   # dimensionless (size parameters)
     radii_x     = agg.radii     .* k
     return compute_scattering(positions_x, radii_x, m_rel; tol=tol, max_iter=max_iter,
                               use_fft=use_fft, truncation_order=truncation_order,
                               precomputed_fft=precomputed_fft, solver=solver,
-                              initial_amn=initial_amn)
+                              initial_amn=initial_amn, fft_far_order=fft_far_order,
+                              fft_near_factor=fft_near_factor)
 end
 
 # ─────────────────────────────────────────────────────────────
@@ -306,6 +324,22 @@ function _read_truncation_eps(path::String)::Union{Float64,Nothing}
         else
             nothing
         end
+    end
+end
+
+"""
+    _read_fft_far_settings(path::String) -> Tuple{Union{Int,Nothing},Float64}
+
+`(fft_far_order, fft_near_factor)` recorded in an existing results file. Files written
+before these attributes existed let the FFT grid carry all orders. This is reported as
+`(nothing, NaN)`.
+"""
+function _read_fft_far_settings(path::String)::Tuple{Union{Int,Nothing},Float64}
+    return HDF5.h5open(path, "r") do fid
+        a = HDF5.attrs(fid)
+        haskey(a, "fft_far_order") || return (nothing, NaN)
+        v = Int(a["fft_far_order"])
+        v < 0 ? (nothing, NaN) : (v, Float64(a["fft_near_factor"]))
     end
 end
 
@@ -366,6 +400,13 @@ function run_parameter_sweep(
         isequal(eps_file, config.truncation_eps) || error(
             "$(basename(output_h5)) was written with truncation_eps = $(repr(eps_file)), " *
             "but this sweep uses truncation_eps = $(repr(config.truncation_eps)). " *
+            "Use a different output file.")
+        far_file = _read_fft_far_settings(output_h5)
+        far_now  = config.fft_far_order === nothing ? (nothing, NaN) :
+                   (config.fft_far_order, config.fft_near_factor)
+        isequal(far_file, far_now) || error(
+            "$(basename(output_h5)) was written with (fft_far_order, fft_near_factor) = " *
+            "$(repr(far_file)), but this sweep uses $(repr(far_now)). " *
             "Use a different output file.")
         HDF5.h5open(output_h5, "r") do fid
             if haskey(fid, "source") && size(fid["source"], 1) > 0
@@ -456,7 +497,8 @@ function run_parameter_sweep(
         compute_scattering(agg0, m_rel0, k0;
             tol=config.convergence_epsilon, max_iter=config.max_iterations,
             use_fft=effective_use_fft, truncation_order=_order_for(ai0, mci0, mis0[1]),
-            solver=config.solver)  # returns (ScatteringResult, amn); result discarded
+            solver=config.solver, fft_far_order=config.fft_far_order,
+            fft_near_factor=config.fft_near_factor)  # returns (ScatteringResult, amn); result discarded
     end
 
     # ── Weighted ETA: estimate total work using cost proxy per job ───────────
@@ -499,8 +541,11 @@ function run_parameter_sweep(
         job_w   = effective_use_fft ? Float64(np) : Float64(np)^2
 
         # Precompute FFT grid once per (aggregate, medium_condition) group
+        # With fft_far_order the grid is also built for a single refractive index, so that
+        # a resumed sweep uses the same operator as an uninterrupted one.
         local fft_cache::Union{FFTGridData, Nothing} = nothing
-        if effective_use_fft && agg.n_monomers >= 2 && length(mi_list) > 1
+        if effective_use_fft && agg.n_monomers >= 2 &&
+           (length(mi_list) > 1 || config.fft_far_order !== nothing)
             positions_x = agg.positions .* k
             radii_x     = agg.radii     .* k
             local max_noi = 0
@@ -515,7 +560,20 @@ function run_parameter_sweep(
                 max_noi = max(max_noi, noi_tmp)
             end
             nois_for_grid = fill(max_noi, length(radii_x))
-            fft_cache = init_fft_grid(positions_x, radii_x, nois_for_grid)
+            if config.fft_far_order === nothing
+                fft_cache = init_fft_grid(positions_x, radii_x, nois_for_grid)
+            else
+                # Far order from the whole refractive index grid, not from the jobs that
+                # remain, for the same reason.
+                local max_mie = 0
+                for m_abs in ri_grid, s in 1:length(radii_x)
+                    max_mie = max(max_mie, mie_nmax(radii_x[s], m_abs / n_med))
+                end
+                far_order = min(max_noi, max(config.fft_far_order, max_mie))
+                fft_cache = init_fft_grid(positions_x, radii_x, nois_for_grid;
+                                          far_nois=fill(far_order, length(radii_x)),
+                                          near_factor=config.fft_near_factor)
+            end
         end
 
         # ── Record one result (shared by GPU and CPU paths) ─────────────
@@ -639,7 +697,8 @@ function run_parameter_sweep(
                     tol=config.convergence_epsilon, max_iter=config.max_iterations,
                     use_fft=effective_use_fft, truncation_order=_order_for(ai, mci, mi),
                     precomputed_fft=fft_cache, solver=config.solver,
-                    initial_amn=prev_amn)
+                    initial_amn=prev_amn, fft_far_order=config.fft_far_order,
+                    fft_near_factor=config.fft_near_factor)
                 prev_amn = amn_out
                 _record_one!(r, m_abs)
             end

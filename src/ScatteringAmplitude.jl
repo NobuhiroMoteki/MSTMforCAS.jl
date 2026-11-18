@@ -399,6 +399,8 @@ end
         max_iter::Int = 200,
         use_fft::Bool = false,
         truncation_order::Union{Int,Nothing} = nothing,
+        fft_far_order::Union{Int,Nothing} = nothing,
+        fft_near_factor::Float64 = 1.5,
         initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
     ) -> (ScatteringResult, Matrix{ComplexF64})
 
@@ -409,6 +411,9 @@ Compute multi-sphere scattering amplitudes and cross sections.
 - `radii`: [N] sphere size parameters x_i = k_medium × r_i
 - `m_rel`: complex refractive index m_sphere / m_medium
 - `truncation_order`: if specified, use this VSWF truncation order for all spheres
+- `fft_far_order`, `fft_near_factor`: with `use_fft=true`, limit the multipole order that
+  the FFT grid carries and couple the higher orders directly for near pairs only
+  (see `solve_tmatrix`). Default `nothing`: the grid carries all orders.
 - `initial_amn`: if provided, use as initial guess for the iterative solver
   (continuation method for refractive index sweeps)
 
@@ -427,7 +432,9 @@ function compute_scattering(
     truncation_order::Union{Int,Nothing} = nothing,
     precomputed_fft::Union{FFTGridData, Nothing} = nothing,
     solver::Symbol = :cbicg,
-    initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
+    initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing,
+    fft_far_order::Union{Int,Nothing} = nothing,
+    fft_near_factor::Float64 = 1.5
 )::Tuple{ScatteringResult, Matrix{ComplexF64}}
 
     N = length(radii)
@@ -436,7 +443,8 @@ function compute_scattering(
     amn, converged, n_iter, noi_max, nois, offsets, half_nblks, rhs = solve_tmatrix(
         positions, radii, m_rel; tol=tol, max_iter=max_iter, use_fft=use_fft,
         truncation_order=truncation_order, precomputed_fft=precomputed_fft,
-        solver=solver, initial_amn=initial_amn
+        solver=solver, initial_amn=initial_amn,
+        fft_far_order=fft_far_order, fft_near_factor=fft_near_factor
     )
 
     # ── Q_ext (optical theorem) ───────────────────────────────────────────────

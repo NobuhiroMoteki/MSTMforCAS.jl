@@ -72,6 +72,27 @@
             @test isapprox(c.qext[pc], d.qext[pd]; rtol = 2e-2)   # FFT translation is approximate
         end
 
+        @testset "fft_far_order is passed to the FFT grid and recorded" begin
+            path = joinpath(dir, "fft_far.h5")
+            cfg = MSTMforCAS.SweepConfig(; base..., truncation_eps = 1e-2, use_fft = true, fft_far_order = 0)
+            run_parameter_sweep([agg], cfg; output_h5 = path)
+            c = read_cols(path); d = read_cols(joinpath(dir, "fft.h5"))
+            @test all(c.conv .== 1)
+            @test MSTMforCAS._read_fft_far_settings(path) == (0, 1.5)
+            @test MSTMforCAS._read_fft_far_settings(joinpath(dir, "fft.h5")) === (nothing, NaN)
+            pd = sortperm(d.m; by = z -> (real(z), imag(z))); pc = sortperm(c.m; by = z -> (real(z), imag(z)))
+            @test c.order[pc] == d.order[pd]              # sphere orders do not depend on the far order
+            # the three spheres are near pairs of each other, so all orders are coupled directly
+            @test isapprox(c.s1[pc], d.s1[pd]; rtol = 1e-8)
+            # another far-order setting must not share the file
+            @test_throws ErrorException run_parameter_sweep(
+                [agg], MSTMforCAS.SweepConfig(; base..., truncation_eps = 1e-2, use_fft = true, fft_far_order = 4);
+                output_h5 = path)
+            @test_throws ErrorException run_parameter_sweep(
+                [agg], MSTMforCAS.SweepConfig(; base..., truncation_eps = 1e-2, use_fft = true); output_h5 = path)
+            @test run_parameter_sweep([agg], cfg; output_h5 = path) === nothing
+        end
+
         @testset "resume refuses a file written with another setting" begin
             @test_throws ErrorException run_parameter_sweep(
                 [agg], MSTMforCAS.SweepConfig(; base..., truncation_eps = 1e-3); output_h5 = joinpath(dir, "mie.h5"))
