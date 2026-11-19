@@ -20,6 +20,12 @@ Two refractive index grids are available (`--preset`):
       834 nm: m_real 1.65..2.65 (11) x m_imag 0.15..1.45 (14)
       638 nm: m_real 1.55..2.55 (11) x m_imag 0.15..1.65 (16)
       453 nm: m_real 1.35..2.25 (10) x m_imag 0.15..1.55 (15)
+- `ext2`: more m_real columns above `core` + `ext`, over the whole m_imag range. Added because
+  the re-analysis with the corrected LUT puts the fullerene-soot solution at the upper m_real
+  edge. `core`, `ext` and `ext2` together give
+      834 nm: m_real 1.65..2.95 (14) x m_imag 0.15..1.45 (14)
+      638 nm: m_real 1.55..2.75 (13) x m_imag 0.15..1.65 (16)
+      453 nm: m_real 1.35..2.55 (13) x m_imag 0.15..1.55 (15)
 - `full`: m_real 1.55..2.60 x m_imag 0.15..1.60 for all wavelengths, step `--ri-step`.
 
 Run with:
@@ -30,7 +36,7 @@ Options:
   --float32            : Float32 GPU iterations (implies --gpu)
   --truncation-order N : uniform VSWF truncation order, a lower bound for every sphere (default 3,
                          the order that the GPU rows of the original file used)
-  --preset core|ext|full : refractive index grid, see above (default core)
+  --preset core|ext|ext2|full : refractive index grid, see above (default core)
   --ri-step STEP       : with --preset full: 0.05 (default) = the 22 x 30 grid, 0.10 = every
                          second value (11 x 15). The coarse values are a subset of the fine
                          grid, so a later run with 0.05 into the same file adds the rest.
@@ -88,13 +94,17 @@ ri_grids =
              0.638 => [((1.55, 2.55, 11), (1.65, 1.65, 1)),      # one more m_imag row
                        ((1.55, 2.55, 11), (0.15, 0.45, 4))],
              0.453 => [((1.35, 2.25, 10), (0.15, 0.65, 6))])
+    elseif preset == "ext2"
+        Dict(0.834 => [((2.75, 2.95, 3), (0.15, 1.45, 14))],
+             0.638 => [((2.65, 2.75, 2), (0.15, 1.65, 16))],
+             0.453 => [((2.35, 2.55, 3), (0.15, 1.55, 15))])
     elseif preset == "full"
         g = isapprox(ri_step, 0.05) ? ((1.55, 2.60, 22), (0.15, 1.60, 30)) :
             isapprox(ri_step, 0.10) ? ((1.55, 2.55, 11), (0.15, 1.55, 15)) :
             error("--ri-step must be 0.05 or 0.10")
         Dict(0.834 => [g], 0.638 => [g], 0.453 => [g])
     else
-        error("--preset must be core, ext or full")
+        error("--preset must be core, ext, ext2 or full")
     end
 all(wl -> haskey(ri_grids, wl), wl_sel) || error("--wl values must be among 0.834, 0.638, 0.453")
 n_ri(wl) = sum(r[1][3] * r[2][3] for r in ri_grids[wl])
