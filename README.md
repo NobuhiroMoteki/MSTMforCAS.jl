@@ -10,6 +10,8 @@ Compute numerically exact light scattering solutions for particles consisting of
 
 Reference implementation: [MSTM-v4.0_for_CAS](https://github.com/NobuhiroMoteki/MSTM-v4.0_for_CAS) (Fortran/MPI).
 
+**Changes and corrections:** see [CHANGELOG.md](CHANGELOG.md). Its first section lists the corrections that change numerical results, with the affected versions.
+
 For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie coefficients, translation addition theorem, multi-sphere interaction equation, CBICG solver, and output quantities), see [docs/theory_note.pdf](docs/theory_note.pdf).
 
 ## Physical Scope
@@ -411,6 +413,7 @@ julia --project=. scripts/read_results_h5_for_cas.jl data/results/results_fullsw
 ```text
 MSTMforCAS.jl/
 ├── Project.toml
+├── CHANGELOG.md               # Changes by version, corrections that change results
 ├── src/
 │   ├── MSTMforCAS.jl          # Top-level module
 │   ├── MieCoefficients.jl     # Lorenz-Mie coefficients aₙ, bₙ
