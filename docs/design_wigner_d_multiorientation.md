@@ -1,6 +1,6 @@
 # Design: Cheap multi-orientation CAS-v2 via cluster T-matrix + Wigner-D rotation
 
-**Status:** phases P1 (Wigner-D kernel, `src/WignerRotation.jl`) and P2 (cluster T-matrix with direct translation, `src/ClusterTMatrix.jl`) are implemented and tested. Phases P3 and P4 are not. The text below is the design as written before the implementation; Sec. 1 describes the state at that time. Target: MSTMforCAS.jl.
+**Status:** phases P1 (Wigner-D kernel, `src/WignerRotation.jl`) and P2 (cluster T-matrix with direct translation, `src/ClusterTMatrix.jl`) are implemented and tested. For phase P4 there is a producer script (`scripts/run_sampled_lut.jl`), checked on a small example. Phase P3 (multi-RHS solve with FFT) is not implemented. The text below is the design as written before the implementation; Sec. 1 describes the state at that time. Target: MSTMforCAS.jl.
 **Author:** prepared with the assistance of Claude (Anthropic); the author assumes full responsibility.
 
 ## 1. Motivation and current state
