@@ -35,7 +35,7 @@ Each column of the sweep results is stored as a 1-D dataset (length = number of 
 | `S{11,22,12,21}_fwd_re`, `S{11,22,12,21}_fwd_im` | float64 | MI02 forward amplitudes [length] |
 | `S{11,22,12,21}_bwd_re`, `S{11,22,12,21}_bwd_im` | float64 | MI02 backward amplitudes [length] |
 | `Q_ext`, `Q_abs`, `Q_sca` | float64 | Efficiency factors (dimensionless) |
-| `converged` | bool | Solver convergence flag |
+| `converged` | int8 | Solver convergence flag (1 = converged) |
 | `n_iterations` | int | Number of solver iterations |
 | `truncation_order` | int | Maximum VSWF truncation order used |
 
@@ -47,7 +47,10 @@ Each column of the sweep results is stored as a 1-D dataset (length = number of 
 | `medium_conditions_refindex` | float64[] | Medium refindex values for each medium condition |
 | `m_real_range` | float64[3] | (min, max, n_grid) for Re(m) |
 | `m_imag_range` | float64[3] | (min, max, n_grid) for Im(m) |
-| `n_jobs` | int | Total number of result rows |
+| `truncation_eps` | float64 | `truncation_eps` of the sweep; NaN if not used |
+| `fft_far_order` | int | `fft_far_order` of the sweep; -1 if not used |
+| `fft_near_factor` | float64 | `fft_near_factor` of the sweep |
+| `n_jobs` | int | Total number of result rows. Written by `write_results_hdf5` only, not by the incremental output of `run_parameter_sweep` |
 
 ## CAS-v2 observable quantities
 
