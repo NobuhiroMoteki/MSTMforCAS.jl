@@ -15,7 +15,7 @@
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-04-19 (corresponds to MSTMforCAS.jl v0.4.5)}
+\date{Last updated: 2026-11-20 (corresponds to MSTMforCAS.jl v0.5.0)}
 
 \begin{document}
 \maketitle
@@ -522,9 +522,11 @@ The Complex Amplitude Sensing (CAS-v2) protocol (Moteki \& Adachi 2024) directly
 \begin{align}
   S_s^\mathrm{fwd} &= S_{11}^\mathrm{MI02} + i\,S_{12}^\mathrm{MI02} \label{eq:cas-ss} \\
   S_p^\mathrm{fwd} &= S_{22}^\mathrm{MI02} - i\,S_{21}^\mathrm{MI02} \label{eq:cas-sp} \\
-  S^\mathrm{bak}   &= \frac{-S_{11}^\mathrm{MI02,bwd} + S_{22}^\mathrm{MI02,bwd}}{\sqrt{2}} \label{eq:cas-sbak}
+  S^\mathrm{bak}   &= \frac{-S_{11}^\mathrm{MI02,bwd} + S_{22}^\mathrm{MI02,bwd}}{2} \label{eq:cas-sbak}
 \end{align}
 where $S_s^\mathrm{fwd}$ and $S_p^\mathrm{fwd}$ are the forward scattering amplitudes for $s$- and $p$-polarised incident light, respectively, and $S^\mathrm{bak}$ is the depolarisation-sensitive backward scattering amplitude.
+Equation~\eqref{eq:cas-sbak} is the corrected Eq.~(28) of Moteki \& Adachi (2024), given in the erratum to that paper.
+The printed equation has $1/\sqrt{2}$ in place of $1/2$.
 
 %% ============================================================
 \section{Computational Flow Summary}

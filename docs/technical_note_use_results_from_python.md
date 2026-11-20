@@ -57,9 +57,11 @@ The CAS-v2 directly observed quantities are derived from the MI02 scattering amp
 |------------|---------|-------------|
 | `Ss_fwd` | `S11_fwd + S12_fwd * 1j` | s-polarization forward complex scattering amplitude |
 | `Sp_fwd` | `S22_fwd - S21_fwd * 1j` | p-polarization forward complex scattering amplitude |
-| `S_bak` | `(-S11_bwd + S22_bwd) / sqrt(2)` | Backward scattering amplitude (depolarization-sensitive) |
+| `S_bak` | `(-S11_bwd + S22_bwd) / 2` | Backward scattering amplitude of the OCBS signal (depolarization-sensitive) |
 
 where `S11`, `S12`, `S21`, `S22` are complex MI02-convention amplitudes with dimension of length (same unit as wavelength).
+
+`S_bak` follows the corrected Eq. (28) of Moteki and Adachi (2024), given in the erratum to that paper. The printed equation has `1/sqrt(2)` in place of `1/2`. Versions of this note up to MSTMforCAS.jl v0.4.5 used the printed form, which gives `sqrt(2)` times the present value with the same phase. The HDF5 files store `S11_bwd` and `S22_bwd` and need no change.
 
 ## Python implementation
 
@@ -181,7 +183,7 @@ def read_cas_results(h5path, i_medium=0, i_agg=0, i_Np=0, i_Df=0,
         # CAS-v2 observables
         Ss_fwd = S11_fwd + S12_fwd * 1j
         Sp_fwd = S22_fwd - S21_fwd * 1j
-        S_bak  = (-S11_bwd + S22_bwd) / np.sqrt(2)
+        S_bak  = (-S11_bwd + S22_bwd) / 2   # corrected Eq. (28) of Moteki and Adachi (2024)
 
         return {
             "wavelength": v_wl,

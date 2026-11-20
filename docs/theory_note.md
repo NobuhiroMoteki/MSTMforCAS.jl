@@ -2,7 +2,7 @@
 
 **Author:** N. Moteki
 
-**Last updated:** 2026-03-26 (corresponds to MSTMforCAS.jl v0.3.0)
+**Last updated:** 2026-11-20 for Eq. (31); the rest corresponds to MSTMforCAS.jl v0.3.0
 
 This document provides a self-contained description of the mathematical theory behind the Multi-Sphere T-Matrix (MSTM) method as implemented in MSTMforCAS.jl. It covers the VSWF expansion formalism, Lorenz–Mie theory for single spheres, the multi-sphere interaction equation, VSWF translation addition theorem, the Complex BiConjugate Gradient (CBICG) iterative solver, the FFT-accelerated translation algorithm, and the output quantities (scattering amplitudes and cross-section efficiencies). The implementation follows the formulation of Mackowski (1991, 1994, 1996), Xu (1996), Mackowski & Mishchenko (2011), and Mackowski & Kolokolova (2022). Scattering amplitude conventions follow Bohren & Huffman (1983, hereafter BH83).
 
@@ -373,10 +373,10 @@ S_p^\mathrm{fwd} = S_{22}^\mathrm{MI02} - i\,S_{21}^\mathrm{MI02} \qquad \textrm
 ```
 
 ```math
-S^\mathrm{bak} = \frac{-S_{11}^\mathrm{MI02,bwd} + S_{22}^\mathrm{MI02,bwd}}{\sqrt{2}} \qquad \textrm{(31)}
+S^\mathrm{bak} = \frac{-S_{11}^\mathrm{MI02,bwd} + S_{22}^\mathrm{MI02,bwd}}{2} \qquad \textrm{(31)}
 ```
 
-where $`S_s^\mathrm{fwd}`$ and $`S_p^\mathrm{fwd}`$ are the forward scattering amplitudes for $`s`$- and $`p`$-polarised incident light, respectively, and $`S^\mathrm{bak}`$ is the depolarisation-sensitive backward scattering amplitude.
+where $`S_s^\mathrm{fwd}`$ and $`S_p^\mathrm{fwd}`$ are the forward scattering amplitudes for $`s`$- and $`p`$-polarised incident light, respectively, and $`S^\mathrm{bak}`$ is the depolarisation-sensitive backward scattering amplitude. Equation (31) is the corrected Eq. (28) of Moteki & Adachi (2024), given in the erratum to that paper. The printed equation has $`1/\sqrt{2}`$ in place of $`1/2`$.
 
 ---
 
