@@ -61,7 +61,7 @@ The CAS-v2 directly observed quantities are derived from the MI02 scattering amp
 
 where `S11`, `S12`, `S21`, `S22` are complex MI02-convention amplitudes with dimension of length (same unit as wavelength).
 
-`S_bak` follows the corrected Eq. (28) of Moteki and Adachi (2024), given in the erratum to that paper. The printed equation has `1/sqrt(2)` in place of `1/2`. Versions of this note up to MSTMforCAS.jl v0.4.5 used the printed form, which gives `sqrt(2)` times the present value with the same phase. The HDF5 files store `S11_bwd` and `S22_bwd` and need no change.
+`S_bak` follows the corrected Eq. (28) of Moteki and Adachi (2024), given in the erratum to that paper. The printed equation has `1/sqrt(2)` in place of `1/2`. Versions of this note before MSTMforCAS.jl v1.1.0 used the printed form, which gives `sqrt(2)` times the present value with the same phase. The HDF5 files store `S11_bwd` and `S22_bwd` and need no change.
 
 ## Python implementation
 

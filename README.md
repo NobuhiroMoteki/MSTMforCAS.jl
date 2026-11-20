@@ -381,7 +381,7 @@ This script reads an HDF5 results file and outputs CAS-v2 observable quantities 
 
 where S11, S12, S21, S22 are the MI02-convention amplitude matrix elements.
 
-`S_bak` follows the corrected Eq. (28) of Moteki and Adachi (2024), given in the erratum to that paper. The printed equation has `1/√2` in place of `1/2`. Versions up to 0.4.5 followed the printed equation, so their `S_bak` is `√2` times the present value, with the same phase. The HDF5 result files store `S11_bwd` and `S22_bwd` and are not affected. The forward amplitudes and the efficiencies are not affected either. block-DDA_Py (from v0.8.2) and block-VIEM.jl (from v0.8.0) use the same corrected definition.
+`S_bak` follows the corrected Eq. (28) of Moteki and Adachi (2024), given in the erratum to that paper. The printed equation has `1/√2` in place of `1/2`. All versions before 1.1.0 (the release v1.0.1 and versions up to 0.4.5) followed the printed equation, so their `S_bak` is `√2` times the present value, with the same phase. The HDF5 result files store `S11_bwd` and `S22_bwd` and are not affected. The forward amplitudes and the efficiencies are not affected either. block-DDA_Py (from v0.8.2) and block-VIEM.jl (from v0.8.0) use the same corrected definition.
 
 When run without index arguments (or with all indices set to 1), it first lists the available parameter values and their counts:
 
@@ -513,7 +513,7 @@ Thread safety: the translation coefficient cache is pre-warmed single-threaded b
 
 ### GPU-accelerated batched solver with hybrid CPU parallelism (v0.4.1)
 
-> **Correction (2026-11-18, released in v0.5.0).** In versions 0.4.1 to 0.4.5 (up to commit `40da716`) the GPU path applied the Mie T-matrix of the first sphere to every sphere in the iteration operator. Results were correct only for aggregates of equal spheres. For monomer radii with a relative standard deviation of 0.1, the forward amplitudes of single aggregates were off by 5–20 %. The CPU path was not affected. The GPU path now uses the T-matrix of each sphere. Results computed with `use_gpu = true` before this correction for aggregates of unequal spheres should be recomputed.
+> **Correction (2026-11-18, released in v1.1.0).** In all earlier versions with a GPU path (the release v1.0.1 of 2026-03-28 and versions 0.4.1 to 0.4.5, up to commit `40da716`) the GPU path applied the Mie T-matrix of the first sphere to every sphere in the iteration operator. Results were correct only for aggregates of equal spheres. For monomer radii with a relative standard deviation of 0.1, the forward amplitudes of single aggregates were off by 5–20 %. The CPU path was not affected. The GPU path now uses the T-matrix of each sphere. Results computed with `use_gpu = true` before this correction for aggregates of unequal spheres should be recomputed. Version numbers: the release v1.0.1 was made on 2026-03-28, and the versions 0.4.1 to 0.4.5 came after it. Version 1.1.0 supersedes all of them.
 
 The GPU solver processes multiple refractive index values simultaneously on a single GPU device, exploiting the fact that the translation operator $\mathbf{A}$ depends only on geometry and is shared across all RI values in a group. A hybrid mode runs CPU threads concurrently with the GPU to maximise hardware utilisation.
 
