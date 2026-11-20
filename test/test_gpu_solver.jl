@@ -119,5 +119,39 @@ else
             end
         end
 
+        @testset "Unequal radii: every sphere has its own T-matrix" begin
+            # Bent chain of four touching spheres with different radii; coordinates in um.
+            # Sphere 1 is the smallest, so a T-matrix shared from sphere 1 would be far off.
+            radii = Float64[0.011, 0.015, 0.018, 0.0135]
+            positions = zeros(Float64, 3, 4)                       # shape: (3, 4)
+            positions[:, 2] = positions[:, 1] .+ (radii[1] + radii[2]) .* [1.0, 0.0, 0.0]
+            positions[:, 3] = positions[:, 2] .+ (radii[2] + radii[3]) .* [0.0, 1.0, 0.0]
+            positions[:, 4] = positions[:, 3] .+ (radii[3] + radii[4]) .* [0.0, 0.6, 0.8]
+            k = 2pi / 0.834                                        # wavenumber [1/um]
+            agg = AggregateGeometry(positions, radii, 4, "test_unequal_radii")
+            ri_values = [ComplexF64(1.6, 0.2), ComplexF64(2.2, 1.0)]
+            order = 4                                              # same order on both paths
+            fft_cache = MSTMforCAS.init_fft_grid(positions .* k, radii .* k, fill(order, 4))
+
+            cpu = [compute_scattering(agg, m, k; use_fft=true, truncation_order=order, tol=1e-12)[1]
+                   for m in ri_values]
+            for (float32, rtol_s, tol) in ((false, 1e-6, 1e-12), (true, 1e-3, 1e-5))
+                gpu = MSTMforCAS._gpu_batch_solve_ref[](
+                    agg, k, ri_values, 1.0, fft_cache,
+                    (tol=tol, max_iter=200, truncation_order=order, float32=float32))
+                for idx in eachindex(ri_values)
+                    r_gpu, _ = gpu[idx]
+                    r_cpu = cpu[idx]
+                    @test r_gpu.converged
+                    for q in 1:2
+                        @test isapprox(r_gpu.S_forward[q], r_cpu.S_forward[q]; rtol=rtol_s)
+                        @test isapprox(r_gpu.S_backward[q], r_cpu.S_backward[q]; rtol=rtol_s)
+                    end
+                    @test isapprox(r_gpu.Q_ext, r_cpu.Q_ext; rtol=rtol_s)
+                    @test isapprox(r_gpu.Q_abs, r_cpu.Q_abs; rtol=rtol_s)
+                end
+            end
+        end
+
     end  # @testset "GPU solver"
 end

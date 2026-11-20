@@ -12,6 +12,7 @@ under plane wave incidence.
 - `TranslationCoefs`: Vector spherical wave function translation coefficients
 - `TMatrixSolver`: Multi-sphere interaction equation solver
 - `ScatteringAmplitude`: Forward/backward amplitudes and cross sections
+- `TruncationOrder`: Truncation order for near-touching monomers from a two-sphere preliminary calculation
 - `AggregateIO`: Read aggregate geometry files (aggregate_generator_PTSA format)
 - `ParameterSweep`: Orchestrate parameter sweeps with parallel execution
 
@@ -36,6 +37,7 @@ include("TranslationCoefs.jl")
 include("FFTTranslation.jl")
 include("TMatrixSolver.jl")
 include("ScatteringAmplitude.jl")
+include("TruncationOrder.jl")
 include("ClusterTMatrix.jl")
 include("AggregateIO.jl")
 include("ParameterSweep.jl")
@@ -47,6 +49,8 @@ export run_parameter_sweep          # batch computation
 export write_results_hdf5          # write DataFrame to HDF5
 export read_aggregate_file          # I/O: .ptsa/.pos text files
 export read_aggregate_catalog       # I/O: HDF5 + CSV catalog (aggregate_generator_PTSA)
+export contact_truncation_order     # truncation order for near-touching monomers
+export contact_order_scan           # per-order error table behind contact_truncation_order
 export ScatteringResult             # output data structure
 export AggregateGeometry            # aggregate geometry + metadata
 

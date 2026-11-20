@@ -64,9 +64,10 @@ struct GPUBatchBuffers{CT<:Complex, RT<:AbstractFloat}
     err     ::CuVector{RT}
     converged ::CuVector{Int32}
 
-    # T-matrix per RI: (noi_max, B) — always CT (downcast from FP64 if float32 mode)
-    t_diag  ::CuMatrix{CT}
-    t_off   ::CuMatrix{CT}
+    # T-matrix per sphere and per RI: (noi_max, N, B) — always CT (downcast from FP64 if
+    # float32 mode). Every sphere has its own Mie coefficients because the radii differ.
+    t_diag  ::CuArray{CT, 3}
+    t_off   ::CuArray{CT, 3}
 
     # mn→n lookup: (hnb_max,) shared across B
     mn_to_n ::CuVector{Int32}
@@ -187,9 +188,10 @@ function allocate_batch_buffers(
     err     = CUDA.zeros(RT, B)
     converged = CUDA.zeros(Int32, B)
 
-    # T-matrix (will be downcast from FP64 at upload time)
-    t_diag  = CUDA.zeros(CT, noi_max, B)
-    t_off   = CUDA.zeros(CT, noi_max, B)
+    # T-matrix per sphere (will be downcast from FP64 at upload time)
+    n_spheres = neqns ÷ (2 * hnb_max)
+    t_diag  = CUDA.zeros(CT, noi_max, n_spheres, B)
+    t_off   = CUDA.zeros(CT, noi_max, n_spheres, B)
 
     # mn→n lookup
     mn_to_n_cpu = Vector{Int32}(undef, hnb_max)
@@ -234,20 +236,17 @@ function upload_batch_mie!(
 )
     B = length(ri_batch)
     N = length(radii_x)
-    td_cpu = zeros(ComplexF64, noi_max, B)
-    to_cpu = zeros(ComplexF64, noi_max, B)
+    td_cpu = zeros(ComplexF64, noi_max, N, buf.B)   # shape: (noi_max, N, B)
+    to_cpu = zeros(ComplexF64, noi_max, N, buf.B)
 
     for b in 1:B
         m_rel = ri_batch[b] / n_med
-        # Compute Mie coefficients for all spheres (same RI, different radii)
-        # For CAS aggregates: all radii nearly identical, but we handle general case
+        # Mie coefficients of every sphere: same refractive index, different radii
         for i in 1:N
             a_v, b_v = MSTMforCAS.compute_mie_coefficients(radii_x[i], m_rel; nmax=noi_max)
             for n in 1:min(length(a_v), noi_max)
-                # Accumulate: for uniform noi all spheres contribute identically
-                # but store per-sphere average for correctness
-                td_cpu[n, b] = -(a_v[n] + b_v[n]) / 2
-                to_cpu[n, b] = -(a_v[n] - b_v[n]) / 2
+                td_cpu[n, i, b] = -(a_v[n] + b_v[n]) / 2
+                to_cpu[n, i, b] = -(a_v[n] - b_v[n]) / 2
             end
         end
     end
@@ -281,6 +280,7 @@ function determine_batch_size(
         10 * neqns * bicg_elem +                                    # BiCG vectors
         4 * nx * ny * nz * nblk_node * bicg_elem +                  # anode + gnode (2 p-modes each)
         16 * nx * ny * nz * nblk_node * bicg_elem +                 # aft (2x2x2 pad) + gft
+        (neqns ÷ 3) * bicg_elem +                                   # per-sphere T-matrix, upper bound
         2 * sizeof(ComplexF64) + 2 * sizeof(Float64)                # scalars
     )
 

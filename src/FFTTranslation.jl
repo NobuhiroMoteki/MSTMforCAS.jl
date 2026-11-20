@@ -13,6 +13,12 @@ Algorithm:
    b. FFT convolution: forward FFT → element-wise multiply → inverse FFT
    c. Node → Sphere: translate grid node results back to sphere positions
    d. Near-field correction: direct Hankel translation for excluded neighbor pairs
+
+Far orders (optional): the grid part can carry fewer multipole orders than the spheres.
+Each sphere `i` then has a far order `far_nois[i] ≤ nois[i]`. The node order follows the
+largest far order. Only the orders up to the far order pass through the grid. Orders
+above the far order couple only pairs of spheres that are close to each other, and this
+coupling is computed directly. See `init_fft_grid`.
 """
 
 using FFTW
@@ -59,24 +65,29 @@ struct FFTGridData
     nblk_node     ::Int                      # node_order * (node_order + 2)
     sphere_node   ::Matrix{Int}             # (3, N) grid cell index per sphere
     neighbor_offsets ::Vector{NTuple{3,Int}} # neighbor cell offsets (model=2)
-    # Per-sphere neighbor lists: neighbor_pairs[i] = [j1, j2, ...] for j > i
+    # Per-sphere lists of directly coupled spheres: neighbor_pairs[i] = [j1, j2, ...].
+    # First the spheres in the neighbor cells, then the near spheres outside them.
     neighbor_pairs ::Vector{Vector{Int}}
     # Pre-FFT'd translation matrices: (2nx, 2ny, 2nz, nblk, nblk) per p-mode
     cell_tran_fft_p1 ::Array{ComplexF64, 5}
     cell_tran_fft_p2 ::Array{ComplexF64, 5}
     # Cached sphere-to-node J-type translation matrices
-    # sphere_node_H[i] = H[nblk_node, hnb_sphere_i, 2]
+    # sphere_node_H[i] = H[nblk_node, hnb_far_i, 2], hnb_far_i = far_nois[i]*(far_nois[i]+2)
     sphere_node_H ::Vector{Array{ComplexF64, 3}}
     # Cached node-to-sphere reverse translation matrices
-    # node_sphere_H[i] = H[hnb_sphere_i, nblk_node, 2]
+    # node_sphere_H[i] = H[hnb_far_i, nblk_node, 2]
     node_sphere_H ::Vector{Array{ComplexF64, 3}}
-    # Cached near-field Hankel translation matrices
-    # nearfield_H[i][k] = H matrix for the k-th neighbor pair of sphere i
-    # H has shape (hnb_i, hnb_j, 2) where j = neighbor_pairs[i][k]
+    # Cached direct Hankel translation matrices
+    # nearfield_H[i][k] = H matrix for the k-th pair of sphere i, j = neighbor_pairs[i][k].
+    # Shape (hnb_i, hnb_j, 2) for a near pair, (hnb_far_i, hnb_far_j, 2) for a neighbor-cell
+    # pair that is not near. For a near pair outside the neighbor cells the block
+    # [1:hnb_far_i, 1:hnb_far_j] is zero because the grid already carries it.
     nearfield_H ::Vector{Vector{Array{ComplexF64, 3}}}
     # FFTW plans — batched along first 3 dims of (2nx, 2ny, 2nz, nblk) array
     fft_plan_batch  ::Any   # pre-planned batched forward FFT (dims 1:3)
     ifft_plan_batch ::Any   # pre-planned batched inverse FFT (dims 1:3)
+    far_nois      ::Vector{Int}             # (N,) multipole order of each sphere on the grid
+    near_factor   ::Float64                 # near-pair criterion, see init_fft_grid
 end
 
 # ─────────────────────────────────────────────────────────────
@@ -111,6 +122,7 @@ end
     _setup_fft_grid(positions, radii, nois, max_noi; fv_target=0.2, neighbor_model=2)
 
 Create uniform 3D grid, assign spheres to cells, and build neighbor lists.
+`max_noi` is the largest multipole order that the grid nodes must carry.
 """
 function _setup_fft_grid(
     positions::Matrix{Float64},
@@ -157,7 +169,7 @@ function _setup_fft_grid(
         cell_boundary[m] = center - 0.5 * grid_extent
     end
 
-    # Node order: determined from cell size, must be >= max Mie order
+    # Node order: determined from cell size, must be >= largest order carried by the grid
     node_order = max(ceil(Int, d_cell), max_noi)
 
     # Assign spheres to grid cells
@@ -329,22 +341,70 @@ end
 # ─────────────────────────────────────────────────────────────
 
 """
-    init_fft_grid(positions, radii, nois) -> FFTGridData
+    _is_near_pair(positions, radii, i, j, near_factor) -> Bool
+
+`true` if the center distance of spheres `i` and `j` is at most
+`near_factor × (radii[i] + radii[j])`.
+"""
+@inline function _is_near_pair(
+    positions::Matrix{Float64},
+    radii::Vector{Float64},
+    i::Int,
+    j::Int,
+    near_factor::Float64
+)::Bool
+    d2 = (positions[1, i] - positions[1, j])^2 + (positions[2, i] - positions[2, j])^2 +
+         (positions[3, i] - positions[3, j])^2
+    return d2 <= (near_factor * (radii[i] + radii[j]))^2
+end
+
+"""
+    init_fft_grid(positions, radii, nois; far_nois=nois, near_factor=1.5) -> FFTGridData
 
 Initialize the FFT translation grid for the given sphere configuration.
+
+# Arguments
+- `positions`: (3, N) sphere centers, dimensionless (k_medium × length)
+- `radii`: (N,) sphere size parameters (dimensionless)
+- `nois`: (N,) VSWF truncation order of each sphere
+- `far_nois`: (N,) truncation order of each sphere on the grid, `1 ≤ far_nois[i] ≤ nois[i]`.
+  The node order is `max(ceil(d_cell), maximum(far_nois))`. With the default
+  `far_nois = nois` the operator is the one of Mackowski (2014) and `near_factor` has no
+  effect.
+- `near_factor`: spheres `i`, `j` are a near pair if their center distance is at most
+  `near_factor × (radii[i] + radii[j])` (dimensionless factor, 1 = touching). Used only
+  where `far_nois` is below `nois`.
+
+# Operator with `far_nois < nois`
+The translation operator is split by sphere pair and by multipole order.
+- Orders up to the far order: neighbor-cell pairs are computed directly and all other
+  pairs go through the grid. This part is identical to the operator that
+  `init_fft_grid(positions, radii, far_nois)` gives.
+- Orders above the far order: near pairs are computed directly, whether or not they are in
+  neighbor cells. All other pairs are neglected.
+
+The memory and the time of the grid part therefore depend on the far orders only. The
+near pairs keep the full coupling that a high truncation order is needed for.
 """
 function init_fft_grid(
     positions::Matrix{Float64},
     radii::Vector{Float64},
-    nois::Vector{Int}
+    nois::Vector{Int};
+    far_nois::Vector{Int} = nois,
+    near_factor::Float64 = 1.5
 )::FFTGridData
     N = size(positions, 2)
-    max_noi = maximum(nois)
+    length(far_nois) == N || throw(ArgumentError("far_nois must have one entry per sphere"))
+    all(i -> 1 <= far_nois[i] <= nois[i], 1:N) ||
+        throw(ArgumentError("far_nois must satisfy 1 <= far_nois[i] <= nois[i]"))
+    near_factor >= 0 || throw(ArgumentError("near_factor must be non-negative"))
+    max_noi = maximum(far_nois)
+    decoupled = far_nois != nois
 
     # Grid setup
     cell_dim, d_cell, cell_boundary, node_order, sphere_node,
         neighbor_offsets, neighbor_pairs = _setup_fft_grid(
-            positions, radii, nois, max_noi)
+            positions, radii, far_nois, max_noi)
 
     nblk_node = node_order * (node_order + 2)
 
@@ -354,10 +414,9 @@ function init_fft_grid(
 
     # Precompute sphere↔node translation matrices
     sphere_to_node_H, node_to_sphere_H = _precompute_sphere_node_translations(
-        positions, sphere_node, cell_boundary, d_cell, nois, node_order)
+        positions, sphere_node, cell_boundary, d_cell, far_nois, node_order)
 
-    # Precompute near-field Hankel translation matrices for all neighbor pairs
-    N = size(positions, 2)
+    # Precompute direct Hankel translation matrices for all neighbor-cell pairs
     k_medium = ComplexF64(1.0)
     nearfield_H = Vector{Vector{Array{ComplexF64, 3}}}(undef, N)
     for i in 1:N
@@ -365,8 +424,32 @@ function init_fft_grid(
         nearfield_H[i] = Vector{Array{ComplexF64, 3}}(undef, length(npairs))
         for (k, j) in enumerate(npairs)
             r_ij = Float64[positions[m, i] - positions[m, j] for m in 1:3]
+            # All orders for a near pair, far orders otherwise
+            full = !decoupled || _is_near_pair(positions, radii, i, j, near_factor)
             nearfield_H[i][k] = compute_translation_matrix(
-                r_ij, k_medium, nois[j], nois[i]; use_regular=false)
+                r_ij, k_medium, full ? nois[j] : far_nois[j], full ? nois[i] : far_nois[i];
+                use_regular=false)
+        end
+    end
+
+    # Near pairs outside the neighbor cells: the grid carries the far orders, so add the
+    # remaining blocks of the translation matrix directly.
+    if decoupled
+        for i in 1:N
+            in_cells = Set(neighbor_pairs[i])
+            hnb_far_i = far_nois[i] * (far_nois[i] + 2)
+            for j in 1:N
+                (j == i || j in in_cells) && continue
+                nois[i] == far_nois[i] && nois[j] == far_nois[j] && continue
+                _is_near_pair(positions, radii, i, j, near_factor) || continue
+                r_ij = Float64[positions[m, i] - positions[m, j] for m in 1:3]
+                H = compute_translation_matrix(r_ij, k_medium, nois[j], nois[i];
+                                               use_regular=false)
+                hnb_far_j = far_nois[j] * (far_nois[j] + 2)
+                H[1:hnb_far_i, 1:hnb_far_j, :] .= zero(ComplexF64)
+                push!(neighbor_pairs[i], j)
+                push!(nearfield_H[i], H)
+            end
         end
     end
 
@@ -382,7 +465,8 @@ function init_fft_grid(
         tran_p1, tran_p2,
         sphere_to_node_H, node_to_sphere_H,
         nearfield_H,
-        fft_plan_batch, ifft_plan_batch
+        fft_plan_batch, ifft_plan_batch,
+        copy(far_nois), near_factor
     )
 end
 
@@ -411,7 +495,8 @@ function _sphere_to_node!(
     @inbounds for i in 1:N
         off = offsets[i]
         hnb = half_nblks[i]
-        H = fft_data.sphere_node_H[i]  # (nblk_node, hnb, 2)
+        H = fft_data.sphere_node_H[i]  # (nblk_node, hnb_far, 2)
+        hnb_f = min(hnb, size(H, 2))   # orders above the far order do not go to the grid
         ix = fft_data.sphere_node[1, i]
         iy = fft_data.sphere_node[2, i]
         iz = fft_data.sphere_node[3, i]
@@ -420,7 +505,7 @@ function _sphere_to_node!(
             p_off_s = (p - 1) * hnb  # source p-block offset within sphere
             for kl in 1:nblk_node
                 val = zero(ComplexF64)
-                for mn in 1:hnb
+                for mn in 1:hnb_f
                     val += H[kl, mn, p] * inp[off + p_off_s + mn]
                 end
                 anode[ix, iy, iz, kl, p] += val
@@ -449,14 +534,15 @@ function _node_to_sphere!(
     @inbounds for i in 1:N
         off = offsets[i]
         hnb = half_nblks[i]
-        H = fft_data.node_sphere_H[i]  # (hnb, nblk_node, 2)
+        H = fft_data.node_sphere_H[i]  # (hnb_far, nblk_node, 2)
+        hnb_f = min(hnb, size(H, 1))   # the grid returns the orders up to the far order
         ix = fft_data.sphere_node[1, i]
         iy = fft_data.sphere_node[2, i]
         iz = fft_data.sphere_node[3, i]
 
         for p in 1:2
             p_off_t = (p - 1) * hnb  # target p-block offset
-            for mn in 1:hnb
+            for mn in 1:hnb_f
                 val = zero(ComplexF64)
                 for kl in 1:nblk_node
                     val += H[mn, kl, p] * gnode[ix, iy, iz, kl, p]
@@ -527,7 +613,8 @@ end
 """
     _nearfield_direct!(out, inp, fft_data, offsets, half_nblks)
 
-Direct sphere-to-sphere Hankel translation for neighbor pairs excluded from FFT.
+Direct sphere-to-sphere Hankel translation for the pairs in `fft_data.neighbor_pairs`:
+the neighbor-cell pairs excluded from the FFT and the near pairs outside them.
 Uses precomputed translation matrices from `fft_data.nearfield_H` for speed.
 """
 function _nearfield_direct!(
@@ -547,21 +634,23 @@ function _nearfield_direct!(
         for (k, j) in enumerate(npairs)
             off_j = offsets[j]
             hnb_j = half_nblks[j]
-            H = fft_data.nearfield_H[i][k]  # (hnb_i, hnb_j, 2)
+            H = fft_data.nearfield_H[i][k]  # (hnb_i, hnb_j, 2), or the far-order block
+            nr = min(hnb_i, size(H, 1))     # rows and columns that this pair couples
+            nc = min(hnb_j, size(H, 2))
 
             # p=1 block: out[off_i + kl] += Σ_mn H[kl, mn, 1] * inp[off_j + mn]
-            for kl in 1:hnb_i
+            for kl in 1:nr
                 s = zero(ComplexF64)
-                for mn in 1:hnb_j
+                for mn in 1:nc
                     s += H[kl, mn, 1] * inp[off_j + mn]
                 end
                 out[off_i + kl] += s
             end
 
             # p=2 block: out[off_i + hnb_i + kl] += Σ_mn H[kl, mn, 2] * inp[off_j + hnb_j + mn]
-            for kl in 1:hnb_i
+            for kl in 1:nr
                 s = zero(ComplexF64)
-                for mn in 1:hnb_j
+                for mn in 1:nc
                     s += H[kl, mn, 2] * inp[off_j + hnb_j + mn]
                 end
                 out[off_i + hnb_i + kl] += s

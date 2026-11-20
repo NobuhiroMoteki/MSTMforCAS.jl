@@ -109,10 +109,12 @@ h5open(h5file, "r") do fid
     # ─── CAS-v2 observables ────────────────────────────────────────────
     # Ss_fwd: s-polarization forward complex scattering amplitude
     # Sp_fwd: p-polarization forward complex scattering amplitude
-    # S_bak:  backward scattering amplitude (depolarization-sensitive)
+    # S_bak:  backward scattering amplitude of the OCBS signal (depolarization-sensitive),
+    #         corrected Eq. (28) of Moteki and Adachi (2024) as given in the erratum to that
+    #         paper. The printed equation has 1/sqrt(2) in place of 1/2.
     Ss_fwd = S11_fwd .+ S12_fwd .* im
     Sp_fwd = S22_fwd .- S21_fwd .* im
-    S_bak  = (-S11_bwd .+ S22_bwd) ./ sqrt(2)
+    S_bak  = (-S11_bwd .+ S22_bwd) ./ 2
 
     # ─── Output ──────────────────────────────────────────────────────────
     for i in idx
@@ -132,6 +134,6 @@ h5open(h5file, "r") do fid
         println("  CAS-v2 complex scattering amplitudes [μm]:")
         @printf("    Ss_fwd = S11+S12*i = %+13.6e %+13.6ei\n", real(Ss_fwd[i]), imag(Ss_fwd[i]))
         @printf("    Sp_fwd = S22-S21*i = %+13.6e %+13.6ei\n", real(Sp_fwd[i]), imag(Sp_fwd[i]))
-        @printf("    S_bak  = (-S11+S22)/√2 = %+13.6e %+13.6ei\n", real(S_bak[i]), imag(S_bak[i]))
+        @printf("    S_bak  = (-S11+S22)/2  = %+13.6e %+13.6ei\n", real(S_bak[i]), imag(S_bak[i]))
     end
 end

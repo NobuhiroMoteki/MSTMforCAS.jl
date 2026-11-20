@@ -374,6 +374,8 @@ end
         normalize_error::Bool = true,
         use_fft::Bool = false,
         truncation_order::Union{Int,Nothing} = nothing,
+        fft_far_order::Union{Int,Nothing} = nothing,
+        fft_near_factor::Float64 = 1.5,
         initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
     ) -> (amn, converged, n_iter, noi_max, nois, offsets, half_nblks, rhs)
 
@@ -385,6 +387,13 @@ Solve the multi-sphere T-matrix interaction equation.
 - `m_rel`: complex refractive index ratio (sphere / medium)
 - `truncation_order`: if specified, use this VSWF truncation order for all spheres
   instead of automatic determination. Must be ≥ the auto-determined order.
+- `fft_far_order`: with `use_fft=true`, the multipole order that the FFT grid carries.
+  `nothing` (default) lets the grid carry all orders of every sphere. An integer `F` limits
+  the grid to the far order `min(nois[i], max(F, mie_order_i))` of sphere `i`, so `F = 0`
+  selects the single-sphere Mie order. Orders above the far order then couple near pairs
+  only, by direct translation (see `init_fft_grid`). Ignored when `precomputed_fft` is given.
+- `fft_near_factor`: near-pair criterion for `fft_far_order`. Spheres are a near pair if
+  their center distance is at most `fft_near_factor` times the sum of their radii.
 - `solver`: `:cbicg` (default, Mackowski's Complex BiConjugate Gradient) or
   `:gmres` (GMRES via Krylov.jl — requires only forward operator, no adjoint)
 - `initial_amn`: if provided, use as initial guess for the iterative solver
@@ -413,7 +422,9 @@ function solve_tmatrix(
     precomputed_fft::Union{FFTGridData, Nothing} = nothing,
     solver::Symbol = :cbicg,
     initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing,
-    rhs_ext::Union{Nothing, Matrix{ComplexF64}} = nothing
+    rhs_ext::Union{Nothing, Matrix{ComplexF64}} = nothing,
+    fft_far_order::Union{Int,Nothing} = nothing,
+    fft_near_factor::Float64 = 1.5
 )::Tuple{Matrix{ComplexF64}, Bool, Int, Int, Vector{Int}, Vector{Int}, Vector{Int}, Matrix{ComplexF64}}
 
     N = length(radii)
@@ -428,6 +439,7 @@ function solve_tmatrix(
 
     # ── Step 1: Mie orders and offsets ──────────────────────────────────────
     nois       = Vector{Int}(undef, N)
+    far_nois   = Vector{Int}(undef, N)   # orders carried by the FFT grid (use_fft only)
     half_nblks = Vector{Int}(undef, N)
     nblks      = Vector{Int}(undef, N)
     offsets    = Vector{Int}(undef, N)   # 0-based offset in the global flat vector
@@ -435,6 +447,8 @@ function solve_tmatrix(
     for i in 1:N
         noi_auto = _mie_order(radii[i], m_rel)
         nois[i]       = truncation_order !== nothing ? max(truncation_order, noi_auto) : noi_auto
+        far_nois[i]   = fft_far_order === nothing ? nois[i] :
+                        min(nois[i], max(fft_far_order, noi_auto))
         half_nblks[i] = nois[i] * (nois[i] + 2)
         nblks[i]      = 2 * half_nblks[i]
     end
@@ -504,7 +518,8 @@ function solve_tmatrix(
     fft_gft_buf = Array{ComplexF64}(undef, 0, 0, 0, 0)
     if use_fft && N >= 2
         fft_data = precomputed_fft !== nothing ? precomputed_fft :
-                   init_fft_grid(positions, radii, nois)
+                   init_fft_grid(positions, radii, nois;
+                                 far_nois=far_nois, near_factor=fft_near_factor)
         nx, ny, nz = fft_data.cell_dim
         nb = fft_data.nblk_node
         anode_buf = zeros(ComplexF64, nx, ny, nz, nb, 2)

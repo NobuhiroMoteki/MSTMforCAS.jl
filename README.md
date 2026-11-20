@@ -108,6 +108,9 @@ All length inputs (positions, radii, wavelength) must be given in **the same phy
 | `m_imag_range` | `Tuple{Float64,Float64,Int}` | (min, max, n_grid) for imaginary part (positive κ = absorption). | `(0.0, 0.1, 2)` |
 | `use_fft` | `Bool` | FFT-accelerated translation (default `false`; auto-enabled when any aggregate has Np > 20) | `true` |
 | `truncation_order` | `Union{Int,Nothing}` | Override VSWF truncation order (default `nothing` = auto) | `8` |
+| `truncation_eps` | `Union{Float64,Nothing}` | Target relative accuracy of the forward amplitudes with respect to the truncation order. The order is then chosen for every refractive index by a preliminary two-sphere calculation (default `nothing` = single-sphere Mie criterion only). Suggested: `1e-2` routine, `1e-3` precise. | `1e-2` |
+| `fft_far_order` | `Union{Int,Nothing}` | With FFT translation, the multipole order that the grid carries. Higher orders couple near pairs only, by direct translation (default `nothing` = the grid carries all orders). `0` selects the single-sphere Mie order. | `4` |
+| `fft_near_factor` | `Float64` | Near-pair criterion for `fft_far_order`: center distance at most this factor times the sum of the radii (default `1.5`) | `1.5` |
 | `solver` | `Symbol` | Iterative solver: `:cbicg` (default) or `:gmres` | `:gmres` |
 | `use_gpu` | `Bool` | GPU-accelerated batched solver (default `false`; implies `use_fft=true`) | `true` |
 | `gpu_float32` | `Bool` | Use Float32 for GPU BiCG iterations (default `false`; implies `use_gpu=true`) | `true` |
@@ -116,6 +119,10 @@ All length inputs (positions, radii, wavelength) must be given in **the same phy
 The sweep covers the full Cartesian product: **aggregates × medium_conditions × m_real × m_imag**.
 
 **VSWF truncation order**: By default, the truncation order N for each sphere is determined automatically from the size parameter x using the Wiscombe criterion: $N = \mathrm{round}(x + 4x^{1/3}) + 5$, refined by a convergence check on the Mie efficiencies. Typical values: N=4 for x=1.0, N=5 for x=1.5. To override, pass `truncation_order=N` (applied uniformly to all spheres; if smaller than the auto-determined value, the auto value is used as a floor). The actual truncation order used is reported in the output as `truncation_order`.
+
+**Truncation order for touching monomers**: The single-sphere criterion does not resolve the near field between monomers that touch. For small, strongly absorbing monomers the forward amplitudes can then be off by several percent. With `truncation_eps` set, the order is chosen from a two-sphere calculation (`contact_truncation_order`) so that the forward amplitudes of a touching pair are converged to the given relative accuracy.
+
+**FFT translation at high truncation order**: Memory and time of the FFT grid grow steeply with the order that the grid nodes carry. Only pairs of spheres that are close to each other need the high orders. With `fft_far_order = F` the grid carries the orders up to `max(F, Mie order)`. The orders above it are coupled directly for near pairs only. The result then has the accuracy of the FFT translation at order `F`. For a 350-monomer aggregate at sphere order 8, `F = 4` reduced the memory of the translation data from 2.7 GB to 0.6 GB. The forward amplitudes differed from the direct solution by 0.16% with `F = 4` and by 0.09% with the grid carrying all orders.
 
 ### Aggregate geometry input
 
@@ -369,10 +376,14 @@ This script reads an HDF5 results file and outputs CAS-v2 observable quantities 
 
 - `Ss_fwd = S11_fwd + S12_fwd * i` — s-polarization forward complex scattering amplitude [μm]
 - `Sp_fwd = S22_fwd - S21_fwd * i` — p-polarization forward complex scattering amplitude [μm]
-- `S_bak = (-S11_bwd + S22_bwd) / √2` — backward scattering amplitude [μm]
+- `S_bak = (-S11_bwd + S22_bwd) / 2` — backward scattering amplitude of the OCBS signal [μm]
 - `R_ve`, `Q_ext`, `Q_abs`, `Q_sca`
 
-where S11, S12, S21, S22 are the MI02-convention amplitude matrix elements. When run without index arguments (or with all indices set to 1), it first lists the available parameter values and their counts:
+where S11, S12, S21, S22 are the MI02-convention amplitude matrix elements.
+
+`S_bak` follows the corrected Eq. (28) of Moteki and Adachi (2024), given in the erratum to that paper. The printed equation has `1/√2` in place of `1/2`. Versions up to 0.4.5 followed the printed equation, so their `S_bak` is `√2` times the present value, with the same phase. The HDF5 result files store `S11_bwd` and `S22_bwd` and are not affected. The forward amplitudes and the efficiencies are not affected either. block-DDA_Py (from v0.8.2) and block-VIEM.jl (from v0.8.0) use the same corrected definition.
+
+When run without index arguments (or with all indices set to 1), it first lists the available parameter values and their counts:
 
 ```text
 Available parameter values:
@@ -501,6 +512,8 @@ The speedup is most significant for large aggregates where the solver requires m
 Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section. HDF5 writes are serialized via a lock.
 
 ### GPU-accelerated batched solver with hybrid CPU parallelism (v0.4.1)
+
+> **Correction (2026-11-18, released in v0.5.0).** In versions 0.4.1 to 0.4.5 (up to commit `40da716`) the GPU path applied the Mie T-matrix of the first sphere to every sphere in the iteration operator. Results were correct only for aggregates of equal spheres. For monomer radii with a relative standard deviation of 0.1, the forward amplitudes of single aggregates were off by 5–20 %. The CPU path was not affected. The GPU path now uses the T-matrix of each sphere. Results computed with `use_gpu = true` before this correction for aggregates of unequal spheres should be recomputed.
 
 The GPU solver processes multiple refractive index values simultaneously on a single GPU device, exploiting the fact that the translation operator $\mathbf{A}$ depends only on geometry and is shared across all RI values in a group. A hybrid mode runs CPU threads concurrently with the GPU to maximise hardware utilisation.
 

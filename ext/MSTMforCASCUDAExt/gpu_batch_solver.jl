@@ -269,8 +269,8 @@ function gpu_batch_solve_group(
         bs = length(ri_batch_local)
         rhs_T   = zeros(ComplexF64, neqns, 2, bs)
         rhs_inc = zeros(ComplexF64, neqns, 2, bs)
-        td_all  = zeros(ComplexF64, noi_max, bs)  # for upload_batch_mie
-        to_all  = zeros(ComplexF64, noi_max, bs)
+        td_all  = zeros(ComplexF64, noi_max, N, bs)  # T-matrix of every sphere, shape: (noi_max, N, bs)
+        to_all  = zeros(ComplexF64, noi_max, N, bs)
 
         # Parallel over batch items: each bi writes to independent array slices
         Threads.@threads for bi in eachindex(ri_batch_local)
@@ -279,10 +279,10 @@ function gpu_batch_solve_group(
             mie_vecs = [MSTMforCAS.compute_mie_coefficients(radii_x[s], m_rel; nmax=noi_max) for s in 1:N]
             td_vecs, to_vecs = MSTMforCAS._precompute_T_values(mie_vecs, nois)
 
-            # T-matrix for GPU upload (use sphere 1; all identical for uniform radii)
-            for n in 1:noi_max
-                td_all[n, bi] = td_vecs[1][n]
-                to_all[n, bi] = to_vecs[1][n]
+            # T-matrix for GPU upload: one set of Mie coefficients per sphere (radii differ)
+            for i in 1:N, n in 1:noi_max
+                td_all[n, i, bi] = td_vecs[i][n]
+                to_all[n, i, bi] = to_vecs[i][n]
             end
 
             # Incident wave coefficients with phase factors
@@ -321,8 +321,8 @@ function gpu_batch_solve_group(
         # Upload T-matrix (zero-fill first to clear stale data from previous batch)
         buf.t_diag .= 0
         buf.t_off .= 0
-        copyto!(view(buf.t_diag, :, 1:batch_size_local), CuArray(CT.(prep.td)))
-        copyto!(view(buf.t_off,  :, 1:batch_size_local), CuArray(CT.(prep.to)))
+        copyto!(view(buf.t_diag, :, :, 1:batch_size_local), CuArray(CT.(prep.td)))
+        copyto!(view(buf.t_off,  :, :, 1:batch_size_local), CuArray(CT.(prep.to)))
 
         amn = zeros(ComplexF64, neqns, 2, batch_size_local)
         conv = fill(true, batch_size_local)
