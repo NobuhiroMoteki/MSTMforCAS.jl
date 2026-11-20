@@ -15,7 +15,7 @@
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-11-20 (corresponds to MSTMforCAS.jl v1.1.0)}
+\date{Last updated: 2026-11-20 (MSTMforCAS.jl v1.1.0)}
 
 \begin{document}
 \maketitle
@@ -125,6 +125,8 @@ The multipole expansion is truncated at order $N_i$ determined by the criterion 
   \label{eq:nstop}
 \end{equation}
 refined by a convergence check: starting from this upper bound, $N_i$ is reduced until the cumulative partial extinction efficiency $Q_\mathrm{ext}^{(N_i)}$ deviates from the total by more than $10^{-6}$.
+This criterion describes an isolated sphere.
+For spheres that touch, the order can be raised by the two-sphere criterion of Sec.~\ref{sec:contact-order}.
 
 In the lr\_tran basis, the single-sphere T-matrix for multipole order $n$ takes the $2 \times 2$ form coupling the $p = 1$ and $p = 2$ blocks (Mackowski 1996, derived from the \texttt{mieoa} routine in MSTM v4.0):
 \begin{equation}
@@ -161,6 +163,64 @@ Substituting and rearranging into a single global linear system for $\bm{x} = (\
 \end{equation}
 where $\mathbf{T} = \mathrm{diag}(\mathbf{T}_1, \dots, \mathbf{T}_{N_S})$ is the block-diagonal T-matrix and $\mathbf{A}$ is the off-diagonal translation operator with blocks $\mathbf{H}_{ij}$ ($i \neq j$) and zeros on the diagonal.
 The dimension of this system is $\sum_i 2\,N_i(N_i+2)$ --- twice the multipole block size because each sphere carries both $p = 1$ and $p = 2$ polarisation blocks.
+
+\subsection{Truncation order for touching spheres}
+\label{sec:contact-order}
+
+The single-sphere criterion of Eq.~\eqref{eq:nstop} resolves the field scattered by an isolated sphere.
+It does not resolve the near field between two spheres that almost touch.
+For small spheres the order needed for this coupling is set by $m_\mathrm{rel}$ and by the contact geometry.
+It is nearly independent of the size parameter (Mackowski 1994).
+For small, strongly absorbing monomers the forward amplitudes of an aggregate can be off by several percent at the single-sphere order.
+
+The code can choose the order from a preliminary two-sphere calculation (option \texttt{truncation\_eps}, function \texttt{contact\_truncation\_order}).
+Two equal spheres of size parameter $x$ are placed on the $x$ axis, perpendicular to the incident direction.
+One incident polarisation then has its electric field along the axis of the pair, which is the slowly converging configuration.
+The centre distance is
+\begin{equation}
+  d = 2x\,(1 + g),
+  \label{eq:contact-distance}
+\end{equation}
+where $g$ is the surface separation divided by the sum of the radii.
+The default $g = 0$ (point contact) is the slowest case.
+The forward amplitudes $S_1(0^\circ)$ and $S_2(0^\circ)$ of the pair are computed with a common order $N$ for $N = N_\mathrm{Mie}, N_\mathrm{Mie}+1, \dots$, where $N_\mathrm{Mie}$ is the order of Eq.~\eqref{eq:nstop}.
+The relative increment at order $N$ is
+\begin{equation}
+  \delta_N = \frac{\left[\,\sum_{k=1}^{2} \left|S_k^{(N)} - S_k^{(N-1)}\right|^2\right]^{1/2}}
+                  {\left[\,\sum_{k=1}^{2} \left|S_k^{(N)}\right|^2\right]^{1/2}}.
+  \label{eq:contact-increment}
+\end{equation}
+The contribution of the orders above $N$ is bounded under the assumption that the increments decay at least algebraically, $\delta_N \propto N^{-p}$.
+The exponent is taken from the last three increments as the smaller of the two estimates
+\begin{equation}
+  p = \min\!\left[\frac{\ln(\delta_{N-1}/\delta_N)}{\ln\!\left(N/(N-1)\right)},\;
+                 \frac{\ln(\delta_{N-2}/\delta_{N-1})}{\ln\!\left((N-1)/(N-2)\right)}\right],
+  \label{eq:contact-exponent}
+\end{equation}
+and the tail bound is
+\begin{equation}
+  \tau_N = \frac{\delta_N\,N}{p - 1}\;
+           \frac{\left[\,\sum_k |S_k^{(N)}|^2\right]^{1/2}}{\min_k |S_k^{(N)}|}
+  \qquad (p > 1,\; \delta_N < \delta_{N-1} < \delta_{N-2}).
+  \label{eq:contact-tail}
+\end{equation}
+The bound is taken as infinite if the increments do not yet decrease monotonically or if $p \leq 1$.
+The scan stops at the order $N_\mathrm{top}$ at which $\tau_N \leq f\,\epsilon$, where $\epsilon$ is the requested relative accuracy and $f = 0.25$ by default.
+It also stops at a cap of $N = 40$, in which case the result is a lower bound and the code issues a warning.
+
+The estimated truncation error at order $N$ is the difference to the highest computed order plus the tail bound,
+\begin{equation}
+  e_N = \max_{k=1,2} \frac{\left|S_k^{(N)} - S_k^{(N_\mathrm{top})}\right|}{\left|S_k^{(N_\mathrm{top})}\right|} + \tau_{N_\mathrm{top}}.
+  \label{eq:contact-error}
+\end{equation}
+The difference is taken between complex numbers, so $e_N$ covers both amplitude and phase.
+The contact order $N_\mathrm{c}$ is the smallest order from which $e_N$ stays below $\epsilon$.
+It is never smaller than $N_\mathrm{Mie}$.
+
+In an aggregate calculation every sphere then uses the largest of $N_\mathrm{c}$, its own order from Eq.~\eqref{eq:nstop} and a user-specified order.
+In a parameter sweep $N_\mathrm{c}$ is determined for every refractive index.
+On the GPU path all refractive indices of a batch share the largest order of the batch.
+Suggested values are $\epsilon = 10^{-2}$ for routine use and $\epsilon = 10^{-3}$ for precise calculations.
 
 \subsection{Translation matrix via rotation--axial translation--rotation}
 
@@ -234,6 +294,39 @@ The algorithm proceeds as follows:
 The total cost per iteration becomes $O(N_S + M \log M)$ where $M$ is the number of active grid cells, compared with $O(N_S^2 N_\mathrm{max}^4)$ for the direct algorithm.
 The memory overhead consists of the pre-FFT'd translation matrices, which scale as $O(M \times N_\mathrm{node}^2)$ where $N_\mathrm{node}$ is the node multipole order.
 Mackowski \& Kolokolova (2022) report speed improvements exceeding two orders of magnitude for systems of $10^3$--$10^4$ spheres.
+
+\paragraph{Far order of the grid.}
+\label{sec:fft-far-order}
+The memory and the time of the grid part grow steeply with $N_\mathrm{node}$.
+A high sphere order, such as the contact order of Sec.~\ref{sec:contact-order}, is needed only for the coupling between spheres that are close to each other.
+The code can therefore limit the order that the grid carries (option \texttt{fft\_far\_order}).
+Let $F_i \leq N_i$ be the far order of sphere $i$.
+The node order is $N_\mathrm{node} = \max\!\left(\lceil d \rceil, \max_i F_i\right)$.
+Spheres $i$ and $j$ are called a near pair if
+\begin{equation}
+  |\bm{r}_i - \bm{r}_j| \leq \kappa\,(a_i + a_j),
+  \label{eq:near-pair}
+\end{equation}
+with $\kappa = 1.5$ by default (option \texttt{fft\_near\_factor}).
+The translation operator is split by sphere pair and by multipole order:
+\begin{itemize}[nosep]
+  \item \emph{Orders up to the far order.}
+  Pairs in neighbouring cells are computed directly and all other pairs go through the grid.
+  This part equals the operator described above with $N_i$ replaced by $F_i$.
+  \item \emph{Orders above the far order.}
+  Near pairs are computed directly, whether or not they lie in neighbouring cells.
+  All other pairs are neglected.
+\end{itemize}
+In terms of the blocks $\mathbf{H}_{ij}$, a near pair in neighbouring cells uses the full block.
+A pair in neighbouring cells that is not a near pair uses the block truncated to the far orders.
+A near pair outside the neighbouring cells uses the full block with the part up to the far orders removed, because the grid already carries that part.
+With $F_i = N_i$ the operator is the original one and $\kappa$ has no effect.
+
+In a parameter sweep the far order is $F = \min\!\left[N_\mathrm{max}, \max(F_\mathrm{user}, N_\mathrm{Mie,max})\right]$, where $N_\mathrm{max}$ is the largest sphere order and $N_\mathrm{Mie,max}$ is the largest single-sphere order of Eq.~\eqref{eq:nstop} over the refractive index grid.
+The memory and the time of the grid part then do not depend on the orders that the contact criterion adds.
+The result has the accuracy of the FFT translation at order $F$.
+For an aggregate of 350 monomers at sphere order 8, $F = 4$ reduced the memory of the translation data from \SI{2.7}{\giga\byte} to \SI{0.6}{\giga\byte}.
+The forward amplitudes then differed from the direct solution by \SI{0.16}{\percent}, against \SI{0.09}{\percent} with the grid carrying all orders.
 
 %% ============================================================
 \section{Iterative Solution: Complex BiConjugate Gradient}
@@ -360,6 +453,8 @@ For the typical CAS sweep grid ($18 \times 26$, $m_\mathrm{real} \in [1.55, 2.4]
 An optional CUDA.jl extension provides GPU-accelerated parameter sweeps with hybrid CPU parallelism.
 For a fixed (aggregate, medium condition) group, the translation operator $\mathbf{A}$ depends only on geometry and is shared across all refractive index values.
 The GPU solver exploits this by processing $B$ RI values simultaneously: it uploads the shared FFT translation data to GPU once, then solves $B$ independent CBICG systems $(\mathbf{I} - \mathbf{T}_b \mathbf{A})\bm{x}_b = \mathbf{T}_b\bm{p}_\mathrm{inc}$ in parallel, where only $\mathbf{T}_b$ (the Mie T-matrix) varies per RI.
+$\mathbf{T}_b$ holds the Mie coefficients of every sphere at refractive index $b$, so spheres of unequal radii are treated exactly.
+Versions before v1.1.0 used the coefficients of the first sphere for all spheres in the iteration operator, which was correct for equal spheres only.
 
 For large aggregates ($N_p \gtrsim 500$), the CPU phases of each batch (preparation of RHS vectors and post-processing of solutions) dominate wall time and leave the GPU idle.
 This bottleneck is addressed by three complementary measures:
@@ -367,17 +462,26 @@ This bottleneck is addressed by three complementary measures:
   \item \textbf{Intra-group CPU parallelism}: batch preparation and post-processing are parallelised over the $B$ batch items using \texttt{Threads.@threads}, reducing the CPU-phase time by a factor of $C$ (number of Julia threads).
   \item \textbf{Hybrid GPU+CPU dispatch}: groups with $N_p \leq$ \texttt{gpu\_np\_threshold} (default 500) are processed by CPU threads running \emph{concurrently} with the GPU task via \texttt{Threads.@spawn}, so no CPU core sits idle while the GPU handles a large-aggregate batch.
   \item \textbf{Batched common-origin translation} (v0.4.1): the common-origin translation matrices $\mathbf{J}_{0i}$ (Eq.~\eqref{eq:common-origin}) depend only on geometry, not on the refractive index.
-  They are computed once per group (not once per RI value) and applied to all $B$ solutions simultaneously via a BLAS GEMM: $(\mathbf{J}_{0i}\,\bm{a}^{(i)})_\text{batch} = \mathbf{J}_{0i} \times \bm{A}_\text{batch}$, where $\bm{A}_\text{batch}$ has shape $(N_\text{hnb}, 2B)$.
-  This reduces \texttt{compute\_translation\_matrix} calls from $N_S \times n_\text{RI}$ to $N_S$ per group.
+  They are computed once per group (not once per RI value) and applied to all $B$ solutions simultaneously via a BLAS GEMM,
+  \[
+    (\mathbf{J}_{0i}\,\bm{a}^{(i)})_\text{batch} = \mathbf{J}_{0i} \times \bm{A}_\text{batch},
+  \]
+  where $\bm{A}_\text{batch}$ has shape $(N_\text{hnb}, 2B)$.
+  This reduces the calls of \texttt{compute\_translation\_matrix} from $N_S \times n_\text{RI}$ to $N_S$ per group.
 \end{enumerate}
 Running with \texttt{julia -t auto} activates all mechanisms.
-Measured on an RTX~A6000 with a 24-core CPU (CAS sweep, $N_p = 350$--$2800$, FP32 mode), the hybrid implementation achieves ${\sim}6$ jobs/s versus ${\sim}0.8$ jobs/s without threading — a factor of ${\sim}7\times$ speedup.
+Measured with v0.4.1 on an RTX~A6000 with a 24-core CPU (CAS sweep, $N_p = 350$--$2800$, FP32 mode), the hybrid implementation achieved ${\sim}6$ jobs/s versus ${\sim}0.8$ jobs/s without threading, a factor of ${\sim}7$.
+With v1.1.0 a sweep of \num{2.02e6} jobs took \SI{30}{\hour} on the same machine ($N_p = 350$--$2800$ in steps of 50, 13 fractal dimensions with 10 aggregates each, three wavelengths with 90 to 121 refractive indices per aggregate, uniform order 3, FP32 mode).
+Three GPU processes with 8 threads each computed the groups with $N_p \geq 550$ at 17 jobs/s in total.
+One CPU process with 6 threads computed the groups with $N_p \leq 500$ at 5.4 jobs/s.
+The mean number of iterations per job was 7 to 10 on the GPU.
 
 A Float32 precision mode is available (\texttt{gpu\_float32=true}): Mie coefficients and the RHS are computed in Float64 on CPU, while the iterative solver runs in ComplexF32 on GPU.
 The convergence tolerance is automatically relaxed to $10^{-5}$.
 Validation against the Fortran reference for $N_S = 1000$ spheres across the full CAS RI range shows that FP32 errors are dominated by the FFT translation approximation, not by the reduced floating-point precision.
 
 \subsection{Incident plane wave coefficients}
+\label{sec:incident}
 
 For $z$-axis incidence ($\beta = 0$, $\alpha = 0$), only the $m = \pm 1$ multipole components are non-zero due to the azimuthal symmetry of a circularly decomposed plane wave.
 In the lr\_tran basis, the incident field coefficients for sphere $i$ are:
@@ -529,10 +633,101 @@ Equation~\eqref{eq:cas-sbak} is the corrected Eq.~(28) of Moteki \& Adachi (2024
 The printed equation has $1/\sqrt{2}$ in place of $1/2$.
 
 %% ============================================================
+\section{Cluster T-Matrix and Particle Orientation}
+\label{sec:cluster-tmatrix}
+
+The solution of Eq.~\eqref{eq:global-system} holds for one orientation of the aggregate relative to the incident wave.
+Another orientation can be obtained by rotating the sphere positions and solving again.
+For many orientations of one aggregate it is cheaper to build the T-matrix of the whole aggregate once.
+The functions \texttt{build\_cluster\_tmatrix} and \texttt{cluster\_forward\_amplitudes} implement this path.
+
+\subsection{Cluster T-matrix}
+
+The cluster T-matrix $\mathbf{T}^\mathrm{cl}$ maps the coefficients $\bm{p}_0$ of a field that is regular about the common origin $\bm{r}_0$ to the coefficients $\bm{a}_0$ of the scattered field about the same origin:
+\begin{equation}
+  \bm{a}_0 = \mathbf{T}^\mathrm{cl}\,\bm{p}_0.
+  \label{eq:cluster-tmatrix}
+\end{equation}
+Both vectors are in the lr\_tran basis with the combined index $(mn, p)$.
+The origin $\bm{r}_0$ is the centroid of the sphere centres.
+The order $N_0$ of the expansion about the origin is the largest translation order of Sec.~\ref{sec:output} over all spheres, so $\mathbf{T}^\mathrm{cl}$ is a square matrix of size $K = 2N_0(N_0+2)$.
+The matrix depends on the geometry, the size and $m_\mathrm{rel}$.
+It does not depend on the orientation.
+
+Column $\nu$ of $\mathbf{T}^\mathrm{cl}$ is the response to a unit regular VSWF of index $\nu$ at the origin.
+The mode is translated to each sphere by the regular translation matrix $\mathbf{J}_{i0}$,
+\begin{equation}
+  \bm{p}_\nu^{(i)} = \mathbf{J}_{i0}\,\bm{e}_\nu,
+  \label{eq:cluster-rhs}
+\end{equation}
+where $\bm{e}_\nu$ is the unit vector of mode $\nu$.
+The interaction equation~\eqref{eq:global-system} is solved with this right-hand side, and the solution is merged to the origin by Eq.~\eqref{eq:common-origin}:
+\begin{equation}
+  \mathbf{T}^\mathrm{cl}\,\bm{e}_\nu = \sum_{i=1}^{N_S} \mathbf{J}_{0i}\,\bm{a}_\nu^{(i)}.
+  \label{eq:cluster-column}
+\end{equation}
+All $K$ right-hand sides share the operator $\mathbf{I} - \mathbf{T}\mathbf{A}$.
+The present implementation uses the direct translation operator for these solves, not the FFT operator.
+
+\subsection{Rotation of the expansion coefficients}
+
+The orientation of the particle is given by the intrinsic ZYZ Euler angles $\Omega = (\alpha, \beta, \gamma)$.
+A rotation mixes VSWFs of the same order $n$ only, and it acts in the same way on the two polarisation blocks.
+Within order $n$ the coefficients transform with the Wigner D-matrix (see, e.g., MI02, Appendix~B)
+\begin{equation}
+  D^n_{m'm}(\alpha, \beta, \gamma) = e^{-i m' \alpha}\, d^n_{m'm}(\beta)\, e^{-i m \gamma},
+  \label{eq:wigner-D}
+\end{equation}
+where $d^n_{m'm}(\beta)$ is the real Wigner d-matrix.
+Let $\mathbf{D}(\Omega)$ denote the block-diagonal matrix of these blocks for $n = 1, \dots, N_0$ and both values of $p$.
+It is unitary.
+
+Each element $d^n_{m'm}(\beta)$ is computed by an upward recurrence in $n$.
+The recurrence starts at the lowest order $n_\mathrm{min} = \max(|m'|, |m|)$.
+At this order Wigner's formula
+\begin{multline}
+  d^n_{m'm}(\beta) = \sum_k (-1)^{m'-m+k}\,
+  \frac{\sqrt{(n+m)!\,(n-m)!\,(n+m')!\,(n-m')!}}{(n+m-k)!\,k!\,(m'-m+k)!\,(n-m'-k)!} \\
+  \times \left(\cos\frac{\beta}{2}\right)^{2n+m-m'-2k} \left(\sin\frac{\beta}{2}\right)^{m'-m+2k}
+  \label{eq:wigner-formula}
+\end{multline}
+has a single term, so the seed is free of cancellation.
+With $x = \cos\beta$ and $d^{\,n_\mathrm{min}-1}_{m'm} = 0$ the higher orders follow from
+\begin{multline}
+  l\,\sqrt{\left[(l+1)^2 - m'^2\right]\left[(l+1)^2 - m^2\right]}\; d^{\,l+1}_{m'm}
+  = (2l+1)\left[l(l+1)\,x - m' m\right] d^{\,l}_{m'm} \\
+  - (l+1)\,\sqrt{\left(l^2 - m'^2\right)\left(l^2 - m^2\right)}\; d^{\,l-1}_{m'm}.
+  \label{eq:wigner-recurrence}
+\end{multline}
+For $m' = m = 0$ the element is the Legendre polynomial $P_n(x)$ and its own recurrence is used.
+
+\subsection{Forward amplitudes at a given orientation}
+
+The incident wave stays along $+z$ in the laboratory frame and the particle is rotated by $\Omega$.
+The scattered coefficients about the origin are
+\begin{equation}
+  \bm{a}_0(\Omega) = \mathbf{D}(\Omega)\,\mathbf{T}^\mathrm{cl}\,\mathbf{D}(\Omega)^\dagger\,\bm{p}_{0,z},
+  \label{eq:cluster-orientation}
+\end{equation}
+where $\bm{p}_{0,z}$ holds the plane-wave coefficients of Sec.~\ref{sec:incident} at the origin.
+They carry the phase factor $e^{i z_0}$, where $z_0$ is the dimensionless $z$ coordinate of $\bm{r}_0$.
+The phase reference is then the laboratory plane $z = 0$, as in the fixed-orientation solution.
+Equation~\eqref{eq:cluster-orientation} is evaluated from right to left as two rotations of a vector and one product of a matrix and a vector.
+The cost per orientation is $O(K^2)$.
+The forward amplitudes $S_1$ to $S_4$ follow from $\bm{a}_0(\Omega)$ by Eq.~\eqref{eq:mode-transform} and the amplitude sums of Sec.~\ref{sec:output}.
+$\Omega = (0, 0, 0)$ reproduces the fixed-orientation result.
+
+The implementation was checked in two ways.
+At $\Omega = (0,0,0)$ the amplitudes agree with the direct solution of Eq.~\eqref{eq:global-system}.
+At other orientations they agree with the direct solution for the geometry rotated about its centroid by the same angles.
+The present functions return the forward amplitudes only.
+
+%% ============================================================
 \section{Computational Flow Summary}
 \label{sec:flow}
 
 \begin{center}
+\footnotesize
 \begin{tabular}{@{} rlll @{}}
   \toprule
   Step & Operation & Description & Source file \\
@@ -555,25 +750,33 @@ The printed equation has $1/\sqrt{2}$ in place of $1/2$.
 \label{sec:mapping}
 
 \begin{center}
-\begin{tabular}{@{} p{4.2cm} p{2.8cm} p{4.2cm} p{3.5cm} @{}}
+\footnotesize
+\let\origunderscore\_
+\renewcommand{\_}{\origunderscore\allowbreak}
+\begin{tabular}{@{} >{\raggedright\arraybackslash}p{3.5cm} >{\raggedright\arraybackslash}p{2.9cm} >{\raggedright\arraybackslash}p{4.7cm} >{\raggedright\arraybackslash}p{4.4cm} @{}}
   \toprule
   Theory & Equation(s) & Implementation & File \\
   \midrule
-  Wavenumber, non-dim. & \eqref{eq:wavenumber}--\eqref{eq:a-eff} & \texttt{compute\_scattering}, \texttt{run\_parameter\_sweep} & \texttt{ParameterSweep.jl} \\
-  Mie coefficients $a_n, b_n$ & \eqref{eq:mie-an}--\eqref{eq:nstop} & \texttt{mie\_coefficients} & \texttt{MieCoefficients.jl} \\
-  lr\_tran T-matrix & \eqref{eq:tmatrix-lr} & \texttt{build\_tmatrix} & \texttt{TMatrixSolver.jl} \\
-  Translation $\mathbf{H}_{ij}$ & \eqref{eq:axial-translation}--\eqref{eq:lr-translation} & \texttt{translate\_coefs} & \texttt{TranslationCoefs.jl} \\
-  FFT translation & \eqref{eq:fft-convolution} & \texttt{fft\_translate}, \texttt{setup\_fft\_grid} & \texttt{FFTTranslation.jl} \\
+  Wavenumber, non-dim. & \eqref{eq:wavenumber}--\eqref{eq:a-eff} & \texttt{compute\_scattering}, \texttt{run\_parameter\_sweep} & \texttt{ScatteringAmplitude.jl}, \texttt{ParameterSweep.jl} \\
+  Mie coefficients $a_n, b_n$ & \eqref{eq:mie-an}--\eqref{eq:nstop} & \texttt{compute\_mie\_coefficients} & \texttt{MieCoefficients.jl} \\
+  lr\_tran T-matrix & \eqref{eq:tmatrix-lr} & \texttt{\_precompute\_T\_values}, \texttt{\_apply\_T!} & \texttt{TMatrixSolver.jl} \\
+  Translation $\mathbf{H}_{ij}$ & \eqref{eq:axial-translation}--\eqref{eq:lr-translation} & \texttt{compute\_translation\_matrix} & \texttt{TranslationCoefs.jl} \\
+  FFT translation & \eqref{eq:fft-convolution} & \texttt{apply\_A\_fft!}, \texttt{init\_fft\_grid} & \texttt{FFTTranslation.jl} \\
   CBICG solver & \eqref{eq:global-system}, \eqref{eq:adjoint-symmetry}, Table~\ref{tab:cbicg} & \texttt{\_solve\_bicg} & \texttt{TMatrixSolver.jl} \\
   GMRES solver (optional) & \eqref{eq:global-system}, \eqref{eq:krylov-subspace}, Table~\ref{tab:gmres} & \texttt{gmres} (Krylov.jl) & \texttt{TMatrixSolver.jl} \\
   RI continuation (\S\ref{sec:continuation}) & --- & \texttt{initial\_amn} kwarg & \texttt{TMatrixSolver.jl}, \texttt{ParameterSweep.jl} \\
-  Incident coefficients & \eqref{eq:pinc-q1}--\eqref{eq:pinc-q2} & \texttt{incident\_coefficients} & \texttt{TMatrixSolver.jl} \\
-  Common-origin expansion & \eqref{eq:common-origin}--\eqref{eq:mode-transform} & \texttt{translate\_to\_common\_origin} & \texttt{ScatteringAmplitude.jl} \\
-  BH83 amplitudes $S_1$--$S_4$ & \eqref{eq:bh83-amplitude}--\eqref{eq:amplitude-sum} & \texttt{compute\_amplitude\_matrix} & \texttt{ScatteringAmplitude.jl} \\
-  Cross-section efficiencies & \eqref{eq:qext}--\eqref{eq:qabs} & \texttt{compute\_efficiencies} & \texttt{ScatteringAmplitude.jl} \\
-  MI02 conversion & \eqref{eq:mi02-conversion} & \texttt{bh83\_to\_mi02} & \texttt{ParameterSweep.jl} \\
+  Incident coefficients & \eqref{eq:pinc-q1}--\eqref{eq:pinc-q2} & \texttt{\_genplanewavecoef\_z0} & \texttt{TMatrixSolver.jl} \\
+  Common-origin expansion & \eqref{eq:common-origin}--\eqref{eq:mode-transform} & \texttt{\_merge\_to\_origin!} & \texttt{ScatteringAmplitude.jl} \\
+  BH83 amplitudes $S_1$--$S_4$ & \eqref{eq:bh83-amplitude}--\eqref{eq:amplitude-sum} & \texttt{\_amplitude\_from\_mode\_coefs} & \texttt{ScatteringAmplitude.jl} \\
+  Cross-section efficiencies & \eqref{eq:qext}--\eqref{eq:qabs} & \texttt{compute\_scattering} & \texttt{ScatteringAmplitude.jl} \\
+  MI02 conversion & \eqref{eq:mi02-conversion} & \texttt{run\_parameter\_sweep} (inline) & \texttt{ParameterSweep.jl} \\
   CAS-v2 observables & \eqref{eq:cas-ss}--\eqref{eq:cas-sbak} & \texttt{read\_results\_h5\_for\_cas.jl} & \texttt{scripts/} \\
   Aggregate I/O & --- & \texttt{read\_aggregate\_file}, \texttt{read\_aggregate\_catalog} & \texttt{AggregateIO.jl} \\
+  Contact order (\S\ref{sec:contact-order}) & \eqref{eq:contact-distance}--\eqref{eq:contact-error} & \texttt{contact\_order\_scan}, \texttt{contact\_truncation\_order} & \texttt{TruncationOrder.jl} \\
+  Far order of the grid & \eqref{eq:near-pair} & \texttt{init\_fft\_grid} (\texttt{far\_nois}, \texttt{near\_factor}) & \texttt{FFTTranslation.jl} \\
+  Cluster T-matrix & \eqref{eq:cluster-tmatrix}--\eqref{eq:cluster-column} & \texttt{build\_cluster\_tmatrix} & \texttt{ClusterTMatrix.jl} \\
+  Wigner rotation & \eqref{eq:wigner-D}--\eqref{eq:wigner-recurrence} & \texttt{wigner\_d}, \texttt{wigner\_D} & \texttt{WignerRotation.jl} \\
+  Amplitudes at an orientation & \eqref{eq:cluster-orientation} & \texttt{cluster\_forward\_amplitudes} & \texttt{ClusterTMatrix.jl} \\
   \midrule
   \multicolumn{4}{l}{\textit{GPU extension (optional, via \texttt{using CUDA})}} \\
   GPU batched BiCG & \eqref{eq:global-system}, Table~\ref{tab:cbicg} & \texttt{gpu\_solve\_bicg\_batch!} & \texttt{ext/.../gpu\_batch\_solver.jl} \\

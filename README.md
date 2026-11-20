@@ -20,7 +20,7 @@ For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie 
   - Forward/backward scattering amplitude matrix S₁–S₄ (BH83 convention, dimensionless) and S₁₁, S₂₂, S₁₂, S₂₁ (MI02 convention, dimension of length)
   - Polarization-averaged efficiency factors $Q_\mathrm{ext}$, $Q_\mathrm{abs}$, $Q_\mathrm{sca}$ (unpolarized incidence)
 
-**Note on particle orientation:** MSTMforCAS does not internally support rotation of aggregate orientation. To compute scattering at different orientations, apply the desired rotation to the aggregate geometry file (.ptsa/.pos) before passing it to the code.
+**Note on particle orientation:** `compute_scattering` and `run_parameter_sweep` solve for one fixed orientation, with the incident wave along +z. For another orientation, rotate the aggregate geometry (.ptsa/.pos) before the call. For many orientations of one aggregate, `build_cluster_tmatrix` builds the cluster T-matrix once, and `cluster_forward_amplitudes` returns the forward amplitudes S₁–S₄ at any orientation (ZYZ Euler angles) by a Wigner-D rotation. This path uses direct translation only (no FFT) and gives the forward amplitudes only. The design is described in [docs/design_wigner_d_multiorientation.md](docs/design_wigner_d_multiorientation.md).
 
 ### Convention definitions
 
@@ -416,8 +416,11 @@ MSTMforCAS.jl/
 │   ├── MieCoefficients.jl     # Lorenz-Mie coefficients aₙ, bₙ
 │   ├── TranslationCoefs.jl    # VSWF translation addition theorem
 │   ├── FFTTranslation.jl      # FFT-accelerated translation (O(N + M log M))
-│   ├── TMatrixSolver.jl       # CBICG iterative solver
+│   ├── TMatrixSolver.jl       # CBICG and GMRES iterative solvers
 │   ├── ScatteringAmplitude.jl  # Amplitudes + cross sections
+│   ├── TruncationOrder.jl     # Truncation order from a two-sphere preliminary calculation
+│   ├── WignerRotation.jl      # Wigner d and D matrices
+│   ├── ClusterTMatrix.jl      # Cluster T-matrix and forward amplitudes at any orientation
 │   ├── AggregateIO.jl         # Read .ptsa/.pos and HDF5+CSV catalog
 │   └── ParameterSweep.jl      # Parallel parameter sweeps
 ├── ext/
@@ -431,14 +434,23 @@ MSTMforCAS.jl/
 │   └── results/               # MSTM computation results (CSV/HDF5)
 ├── scripts/
 │   ├── run_single.jl          # Single aggregate computation
+│   ├── run_single_1sphere.jl  # Single sphere, for comparison with Mie theory
 │   ├── run_sweep_h5.jl        # Parameter sweep from HDF5 catalog
+│   ├── run_sweep_h5_extension.jl   # Sweep of an extended refractive index range
+│   ├── run_sweep_h5_regen.jl  # Regeneration of the black-carbon LUT sweep (core, ext, ext2 grids)
 │   ├── run_sweep_small.jl     # Parameter sweep from .ptsa files
+│   ├── run_doublet_sweep.jl   # Two-sphere sweep over orientation
+│   ├── run_sampled_lut.jl     # Sampled table over geometry and orientation
+│   ├── merge_sweep_h5.jl      # Merge sweep files row by row (optional Df range)
+│   ├── merge_extension_h5.jl  # Merge a base sweep file with its extension
 │   ├── validate_testcases.jl  # Validation against Fortran reference
 │   ├── read_results_csv.jl    # Read and summarize CSV output
 │   ├── read_results_h5.jl     # Read and summarize HDF5 output
 │   └── read_results_h5_for_cas.jl  # CAS-specific parameter lookup from HDF5
 ├── docs/
-│   ├── theory_note.md              # Mathematical formulation of MSTM theory
+│   ├── theory_note.pdf             # Mathematical formulation of MSTM theory (source: theory_note.tex)
+│   ├── installation_guide.md       # Setup on WSL2 and native Linux
+│   ├── design_wigner_d_multiorientation.md  # Design of the cluster T-matrix and orientation path
 │   └── technical_note_use_results_from_python.md  # Python reader guide + code
 └── test/
 ```
@@ -564,13 +576,24 @@ This design eliminates the GPU-idle bottleneck that arises for large-Np groups w
 
 The GPU-FP32 errors are dominated by the FFT translation approximation (same as CPU FFT), not by Float32 rounding.
 
-**Measured throughput** (RTX A6000 + 24-core CPU, FP32 mode, CAS sweep Np=350–2800):
+**Measured throughput** (RTX A6000 + 24-core CPU, FP32 mode, CAS sweep Np=350–2800).
 
-| Mode | Rate | Full sweep estimate |
+With v1.1.0, black-carbon sweep of 2.02 million jobs (Np = 350–2800 in steps of 50, 13 fractal dimensions with 10 aggregates each, three wavelengths with 90 to 121 refractive indices per aggregate, uniform truncation order 3):
+
+| Part | Processes | Rate |
 |---|---|---|
-| GPU only, 1 thread (before hybrid) | ~0.8 jobs/s | ~72 days |
-| GPU+CPU hybrid, `-t auto` 24 threads | ~6 jobs/s | ~17 days |
-| Speedup | **~7×** | — |
+| Np ≥ 550, GPU | 3 processes in parallel, 8 threads each | 17 jobs/s in total (5.3–6.4 per process) |
+| Np ≤ 500, CPU | 1 process, 6 threads | 5.4 jobs/s |
+| Whole sweep | — | 30 hours |
+
+The mean number of iterations per job was 7 to 10 on the GPU. The sweep computed with the earlier versions needed about 16 to 18, because of the error described in the correction note above. Several GPU processes on disjoint parts of the aggregate list (`--part I/N` of `scripts/run_sweep_h5_regen.jl`) use the GPU better than one process, because each process spends part of its time on CPU work.
+
+With v0.4.1, one process:
+
+| Mode | Rate |
+|---|---|
+| GPU only, 1 thread (before hybrid) | ~0.8 jobs/s |
+| GPU+CPU hybrid, `-t auto` 24 threads | ~6 jobs/s |
 
 The bottleneck shifts with Np: for large aggregates (Np≥1000) the threaded batch preparation and post-processing dominate, and GPU utilisation increases significantly with `-t auto`. For small aggregates (Np≤500) CPU-thread parallelism alone is more efficient and runs concurrently with the GPU task.
 
