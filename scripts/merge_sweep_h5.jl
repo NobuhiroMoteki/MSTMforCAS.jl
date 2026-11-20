@@ -3,6 +3,7 @@ Merge sweep result files into one HDF5 file, row by row.
 
 Run with:
   julia --project=. scripts/merge_sweep_h5.jl OUT.h5 IN1.h5 [IN2.h5 ...] [--core]
+        [--df-min X] [--df-max Y]
 
 - All input files must have the datasets of `_SWEEP_COLS` in src/ParameterSweep.jl.
 - `m_real` and `m_imag` are rounded to 2 decimals, so that values from different
@@ -10,6 +11,8 @@ Run with:
 - `--core` keeps only the rows on the "core" grid of scripts/run_sweep_h5_regen.jl
   (a refractive index window per wavelength in steps of 0.10). Use it to cut a full-grid
   file down to that grid, for a LUT that differs from a regenerated one in the data only.
+- `--df-min X`, `--df-max Y` keep only the rows with X <= Df <= Y (fractal dimension). Use
+  them to build a LUT for a part of the Df range before the rest of a sweep is finished.
 - Rows with the same (source, wavelength, m_real, m_imag) in more than one place are an
   error.
 
@@ -45,9 +48,23 @@ function _core_mask(wl::Vector{Float64}, mr::Vector{Float64}, mi::Vector{Float64
 end
 
 function main()
-    args = filter(a -> !startswith(a, "--"), ARGS)
+    args = String[]
+    df_min, df_max = -Inf, Inf
+    i = 1
+    while i <= length(ARGS)
+        a = ARGS[i]
+        if a in ("--df-min", "--df-max")
+            i < length(ARGS) || error("$a needs a value")
+            v = parse(Float64, ARGS[i+1])
+            a == "--df-min" ? (df_min = v) : (df_max = v)
+            i += 1
+        elseif !startswith(a, "--")
+            push!(args, a)
+        end
+        i += 1
+    end
     core = "--core" in ARGS
-    length(args) >= 2 || error("usage: merge_sweep_h5.jl OUT.h5 IN1.h5 [IN2.h5 ...] [--core]")
+    length(args) >= 2 || error("usage: merge_sweep_h5.jl OUT.h5 IN1.h5 [IN2.h5 ...] [--core] [--df-min X] [--df-max Y]")
     out = args[1]
     inputs = args[2:end]
     isfile(out) && error("$out exists. Remove it first.")
@@ -63,6 +80,10 @@ function main()
             mi = round.(read(f["m_imag"]); digits = 2)
             src = read(f["source"])
             mask = core ? _core_mask(wl, mr, mi) : trues(length(wl))
+            if isfinite(df_min) || isfinite(df_max)
+                df = read(f["Df"])
+                mask .&= (df .>= df_min - 1e-6) .& (df .<= df_max + 1e-6)
+            end
             for i in eachindex(wl)
                 mask[i] || continue
                 key = (src[i], round(Int, 1000 * wl[i]), round(Int, 100 * mr[i]), round(Int, 100 * mi[i]))
@@ -91,6 +112,8 @@ function main()
         end
         HDF5.attrs(fo)["merged_from"] = join(basename.(inputs), ";")
         HDF5.attrs(fo)["core_subset"] = core ? 1 : 0
+        HDF5.attrs(fo)["df_min"] = df_min
+        HDF5.attrs(fo)["df_max"] = df_max
     end
     @printf("wrote %s: %d rows, %d datasets\n", out, n_total, length(names))
 end
