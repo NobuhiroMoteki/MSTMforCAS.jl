@@ -36,6 +36,10 @@ Options:
   --float32            : Float32 GPU iterations (implies --gpu)
   --truncation-order N : uniform VSWF truncation order, a lower bound for every sphere (default 3,
                          the order that the GPU rows of the original file used)
+  --shared-basis       : one shared Krylov basis per aggregate and wavelength instead of one
+                         CBICG solve per refractive index (CPU only). Use a tag of its own.
+  --truncation-eps EPS : truncation order from the two-sphere calculation (see run_sweep_h5.jl)
+  --fft-far-order F    : far order of the FFT grid (see run_sweep_h5.jl)
   --preset core|ext|ext2|full : refractive index grid, see above (default core)
   --ri-step STEP       : with --preset full: 0.05 (default) = the 22 x 30 grid, 0.10 = every
                          second value (11 x 15). The coarse values are a subset of the fine
@@ -67,6 +71,10 @@ if use_gpu
 end
 
 truncation_order = parse(Int, _arg("--truncation-order", "3"))
+shared_basis = "--shared-basis" in ARGS
+shared_basis && use_gpu && error("--shared-basis is not available with --gpu or --float32")
+truncation_eps = (v = _arg("--truncation-eps", nothing); v === nothing ? nothing : parse(Float64, v))
+fft_far_order  = (v = _arg("--fft-far-order", nothing); v === nothing ? nothing : parse(Int, v))
 preset  = _arg("--preset", "core")
 ri_step = parse(Float64, _arg("--ri-step", "0.05"))
 wl_sel  = parse.(Float64, split(_arg("--wl", "0.834,0.638,0.453"), ","))
@@ -139,7 +147,8 @@ println()
 
 # ─── Run one sweep per wavelength ────────────────────────────────────────────
 println("Preset: $preset, threads: $(Threads.nthreads()), use_gpu: $use_gpu, gpu_float32: $gpu_float32, " *
-        "truncation_order: $truncation_order")
+        "truncation_order: $truncation_order, truncation_eps: $(repr(truncation_eps)), " *
+        "fft_far_order: $(repr(fft_far_order)), shared_basis: $shared_basis")
 n_total = sum(length(aggregates) * n_ri(wl) for wl in wl_sel)
 println("Total jobs: $n_total")
 println()
@@ -154,6 +163,9 @@ for wl in wl_sel, (m_real_range, m_imag_range) in ri_grids[wl]
         convergence_epsilon = 1e-6,
         use_fft             = true,
         truncation_order    = truncation_order,
+        truncation_eps      = truncation_eps,
+        fft_far_order       = fft_far_order,
+        shared_basis        = shared_basis,
         use_gpu             = use_gpu,
         gpu_float32         = gpu_float32,
         gpu_np_threshold    = 500,

@@ -210,6 +210,40 @@ result.n_iterations     # number of CBICG iterations
 result.truncation_order # maximum VSWF truncation order used
 ```
 
+### Many refractive indices of one aggregate (shared Krylov basis)
+
+Since v1.2.0, `sweep_refractive_index` computes one aggregate at one wavelength for many
+refractive indices with one Krylov basis that all refractive indices share. The translation
+operator is applied a fixed number of times per aggregate, not once per iteration and
+refractive index. For about 200 refractive indices of aggregates with 1500 to 2800 monomers
+this was 92 to 146 times faster than one CBICG solve per refractive index on one thread
+(see [Performance](#performance)).
+
+```julia
+positions_x = agg.positions .* k_medium          # dimensionless, shape (3, N)
+radii_x     = agg.radii     .* k_medium          # size parameters, shape (N,)
+m_rels = vec([complex(mr, mi) for mr in 1.5:0.1:2.2, mi in 0.4:0.1:1.2])
+
+results, info = sweep_refractive_index(positions_x, radii_x, m_rels; use_fft=true)
+
+results[j]              # ScatteringResult of m_rels[j]
+info.basis_size         # basis vectors per incident polarization
+info.relres             # true relative residual of every refractive index in the basis
+info.n_fallback         # refractive indices that were solved by CBICG instead
+```
+
+- All spheres and all refractive indices use one truncation order: the largest single-sphere
+  Mie order over the spheres and `m_rels`, or `truncation_order` if that is larger.
+- Every result meets `tol` (default `1e-6`, the criterion of the CBICG solver). The true
+  residual is checked for every refractive index. A refractive index that the basis does not
+  resolve is solved by CBICG, started from the basis solution.
+- The method was validated for 1.30 ≤ Re m ≤ 3.00, 0 ≤ Im m ≤ 1.65 and
+  max|m| × (largest monomer size parameter) ≤ 1.6. A warning is issued outside this range
+  (`shared_basis_range_issues`). Results there still meet `tol`, but the gain in time can be
+  lost. Metallic refractive indices are outside the scope of the method.
+- The one-solve-per-refractive-index method (`compute_scattering`) is unchanged and remains
+  the default of the parameter sweep.
+
 ### Parameter sweep
 
 **From HDF5 + CSV catalog** (recommended):
@@ -244,6 +278,8 @@ run_parameter_sweep(aggregates, config; output_h5="results.h5")
 ```
 
 `run_parameter_sweep` returns `nothing`; all results are written directly to the HDF5 file. If the file already exists, completed jobs are detected automatically and skipped (resume support).
+
+**Shared Krylov basis in the sweep** (v1.2.0, optional): `SweepConfig(...; shared_basis = true)` or `scripts/run_sweep_h5.jl --shared-basis` solves all refractive indices of each (aggregate, medium condition) group with `sweep_refractive_index`. The default (`shared_basis = false`) is one CBICG solve per refractive index, as in earlier versions, and its results do not change. With the shared basis one truncation order is used for the whole group, so the rows differ from those of the default at the level of the truncation error. The two kinds of rows cannot share an output file. The option is for CPU sweeps and is not available together with `use_gpu`.
 
 **From .ptsa text files** (alternative):
 
@@ -421,6 +457,7 @@ MSTMforCAS.jl/
 │   ├── FFTTranslation.jl      # FFT-accelerated translation (O(N + M log M))
 │   ├── TMatrixSolver.jl       # CBICG and GMRES iterative solvers
 │   ├── ScatteringAmplitude.jl  # Amplitudes + cross sections
+│   ├── SharedBasisSweep.jl    # Refractive-index sweep of one aggregate with a shared Krylov basis
 │   ├── TruncationOrder.jl     # Truncation order from a two-sphere preliminary calculation
 │   ├── WignerRotation.jl      # Wigner d and D matrices
 │   ├── ClusterTMatrix.jl      # Cluster T-matrix and forward amplitudes at any orientation
@@ -452,6 +489,7 @@ MSTMforCAS.jl/
 │   └── read_results_h5_for_cas.jl  # CAS-specific parameter lookup from HDF5
 ├── docs/
 │   ├── theory_note.pdf             # Mathematical formulation of MSTM theory (source: theory_note.tex)
+│   ├── figs/                       # Figures of the theory note and the README, with data and script
 │   ├── installation_guide.md       # Setup on WSL2 and native Linux
 │   ├── design_wigner_d_multiorientation.md  # Design of the cluster T-matrix and orientation path
 │   └── technical_note_use_results_from_python.md  # Python reader guide + code
@@ -525,6 +563,48 @@ The speedup is most significant for large aggregates where the solver requires m
 **Progress and crash recovery**: Results are flushed to HDF5 every ~60 seconds with a result snapshot (CAS amplitudes, Q_ext). Remaining time is estimated from the observed job completion rate, displayed in days. If the process is interrupted, restarting with the same output file automatically resumes from where it left off.
 
 Thread safety: the translation coefficient cache is pre-warmed single-threaded before the parallel section. HDF5 writes are serialized via a lock.
+
+### Refractive-index sweep with a shared Krylov basis (v1.2.0)
+
+One aggregate, 195 or 196 refractive indices (1.35 ≤ Re m ≤ 2.95, 0.15 ≤ Im m ≤ 1.55), FFT translation, MSTMforCAS.jl v1.2.0, one thread of a server with Xeon E5-2620 v4 processors. The times include the setup of the translation. "CBICG" is one solve per refractive index with `tol = 1e-6` and cold start, extrapolated from three refractive indices. The errors are those of the shared basis against CBICG solutions with `tol = 1e-14` at the same truncation order. "8/4" is the truncation order 8 with `fft_far_order = 4`.
+
+| Np | Df | Wavelength | Order | Basis size | CBICG | Shared basis | Speed-up | Error forward S₁,S₂ | Error backward S₁,S₂ |
+|---|---|---|---|---|---|---|---|---|---|
+| 1500 | 2.65 | 834 nm | 3 | 14 | 1016 s | 11.0 s | 92 | 1.6e-5 | 2.7e-5 |
+| 1500 | 2.65 | 453 nm | 3 | 18 | 1316 s | 12.6 s | 104 | 2.3e-5 | 2.1e-4 |
+| 2800 | 2.95 | 453 nm | 3 | 27 | 2837 s | 24.4 s | 116 | 8.7e-6 | 1.2e-3 |
+| 2800 | 2.35 | 453 nm | 3 | 18 | 5914 s | 42.2 s | 140 | 2.3e-5 | 2.4e-4 |
+| 1500 | 2.65 | 834 nm | 8/4 | 16 | 3913 s | 36.8 s | 106 | 1.6e-5 | 3.4e-5 |
+| 1500 | 2.65 | 453 nm | 8/4 | 20 | 4953 s | 41.9 s | 118 | 1.8e-5 | 1.1e-4 |
+| 2800 | 2.95 | 453 nm | 8/4 | 30 | 17293 s | 118.2 s | 146 | 1.0e-5 | 4.5e-4 |
+
+![Time of the shared-basis sweep and of CBICG for seven aggregates](docs/figs/shared_basis_times.png)
+
+In a parameter sweep (`shared_basis = true`, six threads, six aggregates × 100 refractive indices, uniform order 3) the gain against the default with continuation was a factor of 28 for Np = 1500 at 834 nm (17.6 s against 485 s) and a factor of 20 for Np = 350 at 453 nm (3.4 s against 67 s). All rows converged without the fallback. The factors are smaller than in the table because the sweep has half as many refractive indices and the default starts every solve from the previous solution.
+
+The stage that is repeated for every refractive index takes 5 ms (first row) to 95 ms (last row) per refractive index, so the speed-up grows with the number of refractive indices. In an earlier test with a prototype of the method, twelve processes at once on a 24-thread desktop each ran at about 55 % of the single-process speed. With the default tolerance the CBICG results themselves differ from the tight solutions by 2e-4 to 5e-4 in the forward amplitudes and by up to 2 % in the backward amplitudes of the larger aggregates.
+
+**Range of use.** The gain depends on the monomer size and the refractive index, because the basis resolves the solution less well as |m| × (size parameter) grows. The table gives the mean monomer size parameter x up to which the shared basis alone keeps the relative error of S₁, S₂ below 1e-3 and 1e-2. Above these values more refractive indices go to the CBICG fallback: the results stay within the tolerance, and the gain in time shrinks.
+
+| Material class | Re m | Im m | Truncation order | Forward: 1e-3 | Forward: 1e-2 | Backward: 1e-3 | Backward: 1e-2 |
+|---|---|---|---|---|---|---|---|
+| Black carbon | 1.45 to 2.25 | 0.35 to 1.25 | 7 to 8 | x ≤ 0.70 | x ≤ 1.1 (extrapolated) | x ≤ 0.55 | x ≤ 0.70 |
+| Black carbon, wider range | 1.45 to 2.55 | 0.35 to 1.55 | 9 to 11 | x ≤ 0.58 | x ≤ 0.95 | x ≤ 0.45 | x ≤ 0.60 |
+| Non-absorbing, low index | 1.30 to 1.70 | 0 | 3 to 5 | x ≤ 1.2 | x ≤ 2.0 | x ≤ 1.1 | x ≤ 1.3 |
+| Non-absorbing, high index | 2.00 to 3.00 | 0 | 7 to 9 | x ≤ 0.60 | x ≤ 0.85 | x ≤ 0.50 | x ≤ 0.70 |
+| Metals | below 1 | above 1.5 | — | out of scope | | | |
+
+![Error of the shared basis as a function of the mean monomer size parameter](docs/figs/shared_basis_limits.png)
+
+The figure shows the error of the basis alone (without the fallback) for the four classes. The horizontal lines mark 1e-3 and 1e-2.
+
+- Conditions: the central 60 spheres of an aggregate with Df = 2.65, direct translation, radii with a relative standard deviation of 0.1 (largest sphere 1.22 times the mean). The truncation order is the one that a touching pair needs for a relative accuracy of 1e-2 (`contact_order_scan`). The values are interpolated between the computed size parameters.
+- Whole aggregates (350, 1500 and 2800 monomers, wider black-carbon range): the forward errors are equal to or smaller than those of the 60-sphere fragment, so the forward limits of the table hold (Np = 2800: 1.8e-4 at x = 0.5 and 2.1e-4 at x = 0.6). The backward errors are larger: 2e-3 to 1.4e-2 from x = 0.5. CBICG with the default tolerance has backward errors of the same size there (1.5e-2 for Np = 1500 at x = 0.5, 1.6e-2 for Np = 2800 at x = 0.6), so a smaller tolerance is needed in both methods when backward amplitudes of large aggregates with such monomers are required. The basis size grows from 16 (fragment) to 24 to 64, and the backward amplitudes of Np = 2800 settle only with 64 to 96 vectors.
+- The mean monomer diameter is x × λ / π in the medium. x = 0.58 corresponds to 84 nm at λ = 453 nm and to 154 nm at λ = 834 nm.
+- The warning of the code uses a narrower range, in which the basis alone gave errors below 2e-4 (forward) and 1e-3 (backward): 1.30 ≤ Re m ≤ 3.00, 0 ≤ Im m ≤ 1.65 and max|m| × (largest monomer size parameter) ≤ 1.6.
+- Metal spheres in point contact have no converged truncation order below 30. With gaps of 5 to 10 % of the sum of the radii the basis needs 100 to more than 250 vectors.
+
+The theory note (`docs/theory_note.pdf`, section "Shared Krylov basis for refractive index sweeps") has the method and the details of these measurements.
 
 ### GPU-accelerated batched solver with hybrid CPU parallelism (v0.4.1)
 

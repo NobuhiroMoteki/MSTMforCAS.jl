@@ -8,14 +8,17 @@
 \usepackage{array}
 \usepackage[margin=2cm]{geometry}
 \usepackage{enumitem}
+\usepackage{graphicx}
 \usepackage{hyperref}
+
+\graphicspath{{./figs/}}
 
 \renewcommand{\arraystretch}{1.6}
 
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-11-20 (MSTMforCAS.jl v1.1.1)}
+\date{Last updated: 2026-11-23 (MSTMforCAS.jl v1.2.0)}
 
 \begin{document}
 \maketitle
@@ -222,6 +225,37 @@ In a parameter sweep $N_\mathrm{c}$ is determined for every refractive index.
 On the GPU path all refractive indices of a batch share the largest order of the batch.
 Suggested values are $\epsilon = 10^{-2}$ for routine use and $\epsilon = 10^{-3}$ for precise calculations.
 
+Table~\ref{tab:contact-orders} lists the contact orders found for several ranges of the refractive index with $\epsilon = 10^{-2}$.
+The orders are the smallest and the largest value over the range and over the size parameters that were examined, which lie between 0.1 and 2.5.
+For dielectric and absorbing spheres in point contact the scan converges below the order 30 everywhere in these ranges.
+For metallic refractive indices it does not.
+With $g = 0$ and $x = 0.1$ none of the 72 refractive indices with $0.1 \leq \mathrm{Re}\,m \leq 1.5$ and $3.0 \leq \mathrm{Im}\,m \leq 7.0$ reaches the tail bound below the order 30.
+At $m = 0.7 + 3.5i$ the forward amplitudes at the orders 4 to 20 still differ from those at order 30 by several tens of percent.
+A truncation order below 30 therefore gives no meaningful result for metal spheres in point contact.
+A finite gap restores the convergence.
+
+\begin{table}[htbp]
+\caption{Contact order $N_\mathrm{c}$ for $\epsilon = 10^{-2}$, smallest and largest value over the range of the refractive index. $g$ is the surface separation divided by the sum of the radii.}
+\label{tab:contact-orders}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} llcl @{}}
+\toprule
+$\mathrm{Re}\,m$ & $\mathrm{Im}\,m$ & $g$ & $N_\mathrm{c}$ \\
+\midrule
+1.30 to 1.70 & 0 & 0 & 2 to 4 \\
+1.45 to 2.25 & 0.35 to 1.25 & 0 & 3 to 8 \\
+1.45 to 2.55 & 0.35 to 1.55 & 0 & 3 to 11 \\
+2.00 to 3.00 & 0 & 0 & 4 to 9 \\
+0.1 to 1.5 & 3.0 to 7.0 & 0 & not converged at order 30 \\
+0.1 to 1.5 & 3.0 to 7.0 & 0.10 & 4 to 6 \\
+0.1 to 1.5 & 3.0 to 7.0 & 0.05 & 5 to 9 \\
+0.1 to 1.5 & 1.5 to 6.0 & 0.10 & 3 to 10 \\
+0.1 to 1.5 & 1.5 to 6.0 & 0.05 & 4 to 17 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{Translation matrix via rotation--axial translation--rotation}
 
 The translation matrix $\mathbf{H}_{ij}$ is computed via the factorisation into rotation, axial translation, and inverse rotation (Mackowski 1996, \S 3; Xu 1996, \S 4), which avoids the direct evaluation of Gaunt integrals and is more efficient:
@@ -382,6 +416,13 @@ The CBICG (Complex BiConjugate Gradient) algorithm is summarised in Table~\ref{t
 
 Note: the convergence criterion (step~7) uses the \emph{bilinear} (not sesquilinear) inner product $\bm{r}^\top \bm{r} = \sum_i r_i^2$, following the Fortran MSTM implementation.  The shadow residual $\bm{q} = \overline{\bm{r}}$ ensures that $\bm{q}^\mathsf{H}\bm{r} = \sum_i r_i^2$.
 
+The tolerance $\varepsilon$ bounds the squared residual, so the default $\varepsilon = 10^{-6}$ stops the iteration at a relative residual norm of $10^{-3}$.
+The error that this leaves in the outputs was measured against solutions with $\varepsilon = 10^{-14}$ at the same truncation order.
+For aggregates of 350 to 2800 monomers with size parameters of 0.09 to 0.25 the forward amplitudes $S_1$ and $S_2$ differ by \numrange{2e-4}{5e-4} in relative terms.
+The backward amplitudes are less accurate because they are small sums of large terms.
+For 1500 to 2800 monomers at size parameters of 0.17 to 0.25 they differ by up to \SI{2}{\percent}.
+A smaller $\varepsilon$ should be used when backward amplitudes of large aggregates are needed to better than that.
+
 \subsection{GMRES algorithm (alternative solver)}
 
 As an alternative to CBICG, a GMRES (Generalized Minimal Residual) solver (Saad \& Schultz 1986) is available via Krylov.jl (\texttt{solver=:gmres}).  GMRES requires only the forward operator $\mathbf{L}\,\bm{v}$ (no adjoint) and minimises the 2-norm of the residual over a Krylov subspace
@@ -479,6 +520,265 @@ The mean number of iterations per job was 7 to 10 on the GPU.
 A Float32 precision mode is available (\texttt{gpu\_float32=true}): Mie coefficients and the RHS are computed in Float64 on CPU, while the iterative solver runs in ComplexF32 on GPU.
 The convergence tolerance is automatically relaxed to $10^{-5}$.
 Validation against the Fortran reference for $N_S = 1000$ spheres across the full CAS RI range shows that FP32 errors are dominated by the FFT translation approximation, not by the reduced floating-point precision.
+
+\subsection{Shared Krylov basis for refractive index sweeps}
+\label{sec:shared-basis}
+
+Since v1.2.0 the package has a second way to sweep the refractive index of one aggregate.
+The function \texttt{sweep\_refractive\_index} solves all refractive indices with one Krylov basis.
+The option \texttt{shared\_basis} of the parameter sweep selects it.
+The default remains one CBICG solve per refractive index, so the results of sweeps without this option do not change.
+
+\paragraph{Idea.}
+In a sweep over the refractive index of one aggregate at one wavelength the translation operator $\mathbf{A}$ and the incident coefficients $\bm{p}_\mathrm{inc}$ stay the same.
+Only $\mathbf{T}(m)$ changes.
+The solver of Sec.~\ref{sec:cbicg} nevertheless applies $\mathbf{A}$ again for every refractive index.
+The method below applies $\mathbf{A}$ a fixed number of times per aggregate.
+It follows the use of shifted Krylov methods for refractive index sweeps in the discrete dipole approximation (Argentin, Inzhevatkin \& Yurkin 2026).
+
+\paragraph{Shifted form.}
+Multiplication of Eq.~\eqref{eq:global-system} by $\mathbf{T}^{-1}$ gives
+\begin{equation}
+  \left(\mathbf{T}^{-1}(m) - \mathbf{A}\right)\bm{x} = \bm{p}_\mathrm{inc}.
+  \label{eq:inverse-form}
+\end{equation}
+The block of $\mathbf{T}$ in Eq.~\eqref{eq:tmatrix-lr} has the eigenvalues $-a_n$ and $-b_n$.
+The block of $\mathbf{T}^{-1}$ has the same form with $1/a_n$ and $1/b_n$ in place of $a_n$ and $b_n$.
+For a sphere much smaller than the wavelength the leading terms are $a_n \propto x^{2n+1}(m^2-1)/(n m^2 + n + 1)$ and $b_n \propto x^{2n+3}(m^2-1)$.
+Their inverses are affine functions of
+\begin{equation}
+  \sigma(m) = \frac{1}{m^2 - 1},
+  \label{eq:shift-function}
+\end{equation}
+because $(n m^2 + n + 1)/(m^2 - 1) = n + (2n+1)\,\sigma$.
+For every sphere $i$, order $n$ and both coefficients, a least-squares fit over the refractive indices of the sweep gives
+\begin{equation}
+  \frac{1}{a_n(x_i, m)} \simeq d^{(a)}_{i,n} + \mu^{(a)}_{i,n}\,\sigma(m), \qquad
+  \frac{1}{b_n(x_i, m)} \simeq d^{(b)}_{i,n} + \mu^{(b)}_{i,n}\,\sigma(m).
+  \label{eq:affine-fit}
+\end{equation}
+The fit is made per sphere, so the radii may differ.
+With the block-diagonal matrices $\mathbf{D}_0$ and $\mathbf{M}$ built from $d$ and $\mu$ in the form of Eq.~\eqref{eq:tmatrix-lr}, $\mathbf{T}^{-1}(m) \simeq -(\mathbf{D}_0 + \sigma\,\mathbf{M})$ and Eq.~\eqref{eq:inverse-form} becomes
+\begin{equation}
+  \left(\mathbf{B} + \sigma(m)\,\mathbf{I}\right)\bm{x} = -\bm{c}, \qquad
+  \mathbf{B} = \mathbf{M}^{-1}\left(\mathbf{D}_0 + \mathbf{A}\right), \qquad
+  \bm{c} = \mathbf{M}^{-1}\bm{p}_\mathrm{inc}.
+  \label{eq:shifted-system}
+\end{equation}
+The refractive index enters as a scalar shift of one matrix.
+
+\paragraph{One basis for all refractive indices.}
+The Krylov subspace
+\begin{equation}
+  \mathcal{K}_K(\mathbf{B} + \sigma\mathbf{I}, \bm{c}) = \mathrm{span}\{\bm{c},\, \mathbf{B}\bm{c},\, \dots,\, \mathbf{B}^{K-1}\bm{c}\}
+  \label{eq:shift-invariance}
+\end{equation}
+does not depend on $\sigma$ (Frommer \& Gl\"assner 1998).
+The Arnoldi process builds an orthonormal basis $\mathbf{V}_K$ of it with
+\begin{equation}
+  \mathbf{B}\,\mathbf{V}_K = \mathbf{V}_{K+1}\,\bar{\mathbf{H}}_K,
+  \label{eq:arnoldi}
+\end{equation}
+where $\bar{\mathbf{H}}_K$ is an upper Hessenberg matrix with $K+1$ rows and $K$ columns.
+This takes $K$ applications of $\mathbf{A}$ for each of the two incident polarisations.
+The products $\mathbf{W}_K = \mathbf{A}\,\mathbf{V}_K$ are kept.
+For each refractive index the GMRES solution of Eq.~\eqref{eq:shifted-system} in this basis is $\bm{x} = \mathbf{V}_K\,\bm{y}$ with
+\begin{equation}
+  \bm{y} = \arg\min_{\bm{y}} \left\| -\beta\,\bm{e}_1 - \left(\bar{\mathbf{H}}_K + \sigma(m)\,\bar{\mathbf{I}}_K\right)\bm{y} \right\|,
+  \label{eq:small-problem}
+\end{equation}
+where $\beta = \|\bm{c}\|$, $\bm{e}_1$ is the first unit vector and $\bar{\mathbf{I}}_K$ is the identity matrix with a row of zeros appended.
+The work per refractive index is of order $K^3$.
+The basis grows until the residual of Eq.~\eqref{eq:small-problem} is below a threshold for every refractive index of the sweep.
+The threshold is $0.03\sqrt{\varepsilon}$ by default (keyword \texttt{basis\_tol}), and the basis has at most 100 vectors per polarisation (keyword \texttt{max\_basis}).
+
+\paragraph{Remainder of the affine fit.}
+The remainder of Eq.~\eqref{eq:affine-fit}, divided by $\mu$, is a matrix over the channels (sphere, order, coefficient) and the refractive indices.
+Its singular values fall quickly.
+For monomers with $x \leq 0.25$ they were \num{2.8e-3}, \num{4e-6} and \num{8.5e-9}.
+A few terms $\sum_s g_s(m)\,\mathbf{E}_s$ of its singular value decomposition therefore represent it.
+Their projections $\mathbf{C}_s = \mathbf{V}_{K+1}^\dagger\,\mathbf{M}^{-1}\mathbf{E}_s\,\mathbf{V}_K$ are computed once, and $\sum_s g_s(m)\,\mathbf{C}_s$ is added to the matrix of Eq.~\eqref{eq:small-problem}.
+The result then agrees with a least-squares solution of Eq.~\eqref{eq:global-system} in the basis with the exact $\mathbf{T}(m)$, at the cost of the small problem.
+The true residual of Eq.~\eqref{eq:global-system},
+\begin{equation}
+  \bm{r} = \mathbf{T}(m)\left(\bm{p}_\mathrm{inc} + \mathbf{W}_K\,\bm{y}\right) - \mathbf{V}_K\,\bm{y},
+  \label{eq:true-residual}
+\end{equation}
+needs no application of $\mathbf{A}$ and serves as the error indicator for each refractive index.
+The basis itself comes from the affine model.
+The residual therefore does not fall below a floor that the remainder sets, however large $K$ is.
+
+\paragraph{Convergence criterion and fallback.}
+A refractive index counts as converged if $\|\bm{r}\|^2 / \|\mathbf{T}\bm{p}_\mathrm{inc}\|^2 < \varepsilon$ for both polarisations, with the true residual of Eq.~\eqref{eq:true-residual}.
+This is the criterion of the CBICG solver with the same tolerance $\varepsilon$.
+A refractive index that does not meet it in the basis is solved by CBICG with $\mathbf{V}_K\,\bm{y}$ as the initial guess (keyword \texttt{fallback}, on by default).
+Every result therefore meets the tolerance, whatever the monomer size and the refractive index.
+What is lost outside the range of the method is the gain in time.
+
+\paragraph{Truncation order.}
+The basis needs one system of equations for all refractive indices.
+All spheres and all refractive indices of a sweep therefore use one truncation order.
+It is the largest of the single-sphere orders of Eq.~\eqref{eq:nstop}, of a user-specified order and, in a parameter sweep with \texttt{truncation\_eps}, of the contact orders of Sec.~\ref{sec:contact-order} over the refractive index grid.
+The solve per refractive index lets the order follow the refractive index instead.
+The two kinds of sweep thus differ at the level of the truncation error, and the parameter sweep does not let them share an output file.
+
+\paragraph{Outputs.}
+The common-origin coefficients of Eq.~\eqref{eq:common-origin} are linear in $\bm{x}$.
+The translation to the common origin is applied once to every basis vector.
+The amplitudes and the efficiencies of each refractive index then follow from $\bm{y}$ with work of order $K$.
+
+\paragraph{Measured accuracy and time.}
+Table~\ref{tab:shared-basis-time} compares the method with the CBICG solver at the default tolerance.
+The numbers were measured with the functions of the package (v1.2.0) on one thread of a server with Xeon E5-2620 v4 processors.
+The aggregates are those of the black-carbon sweep, with monomer size parameters of 0.09 to 0.14 at \SI{834}{\nano\meter} and 0.17 to 0.25 at \SI{453}{\nano\meter}.
+The refractive index grid has 195 or 196 values with $1.35 \leq \mathrm{Re}\,m \leq 2.95$ and $0.15 \leq \mathrm{Im}\,m \leq 1.55$.
+The errors are relative differences to CBICG solutions with $\varepsilon = 10^{-14}$ at the same truncation order and with the same translation operator, at three refractive indices.
+They do not include the truncation error or the error of the FFT translation.
+The CBICG time is the setup of the translation plus the mean time of the solves at those three refractive indices times the number of grid points.
+The solves need 6 to 22 iterations.
+The basis size $K$ is 14 to 20 for most aggregates and 27 to 30 for the largest compact one.
+It does not grow with the truncation order.
+Figure~\ref{fig:shared-basis-times} shows the same times.
+The stage that is repeated for every refractive index, the small problem and the residual check, takes \SI{5}{\milli\second} per refractive index for the first row of the table and \SI{95}{\milli\second} for the last.
+The gain therefore grows with the number of refractive indices.
+In an earlier test with a prototype of the method, twelve processes on a 24-thread desktop machine each ran at about \SI{55}{\percent} of the single-process speed.
+
+The option of the parameter sweep was compared with the default on six aggregates and 100 refractive indices ($1.65 \leq \mathrm{Re}\,m \leq 2.55$, $0.55 \leq \mathrm{Im}\,m \leq 1.45$), with six threads and the uniform order 3.
+The default uses the continuation of Sec.~\ref{sec:continuation} and needs 4 to 7 iterations per refractive index.
+For $N_p = 1500$ at \SI{834}{\nano\meter} the sweep took \SI{17.6}{\second} with the shared basis and \SI{485}{\second} without, a factor of 28.
+For $N_p = 350$ at \SI{453}{\nano\meter} it took \SI{3.4}{\second} and \SI{67}{\second}, a factor of 20.
+The factors are smaller than those of Table~\ref{tab:shared-basis-time} because the sweep has half as many refractive indices and the default starts every solve from the previous solution.
+All 600 rows of each sweep converged, and no row needed the fallback.
+The rows of the two methods differ by at most \num{5e-4} in the forward amplitudes and by at most \num{6e-3} in the backward amplitudes, which is the error that the default tolerance leaves in the CBICG results.
+
+\begin{table}[htbp]
+\caption{Sweep over 195 or 196 refractive indices of one aggregate on one thread, FFT translation, setup of the translation included. ``8/4'' is the truncation order 8 with the far order 4 of Sec.~\ref{sec:fft-far-order}. $t_\mathrm{C}$ is the time of CBICG with $\varepsilon = 10^{-6}$ and cold start, $t_\mathrm{S}$ the time of the shared basis. The errors of $S_1$, $S_2$ are those of the shared basis.}
+\label{tab:shared-basis-time}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} rrrcrrrrrr @{}}
+\toprule
+$N_p$ & $D_f$ & $\lambda$ (\si{\nano\meter}) & Order & $K$ & $t_\mathrm{C}$ (\si{\second}) & $t_\mathrm{S}$ (\si{\second}) & $t_\mathrm{C}/t_\mathrm{S}$ & Forward & Backward \\
+\midrule
+1500 & 2.65 & 834 & 3   & 14 &  1016 &  11.0 &  92 & \num{1.6e-5} & \num{2.7e-5} \\
+1500 & 2.65 & 453 & 3   & 18 &  1316 &  12.6 & 104 & \num{2.3e-5} & \num{2.1e-4} \\
+2800 & 2.95 & 453 & 3   & 27 &  2837 &  24.4 & 116 & \num{8.7e-6} & \num{1.2e-3} \\
+2800 & 2.35 & 453 & 3   & 18 &  5914 &  42.2 & 140 & \num{2.3e-5} & \num{2.4e-4} \\
+1500 & 2.65 & 834 & 8/4 & 16 &  3913 &  36.8 & 106 & \num{1.6e-5} & \num{3.4e-5} \\
+1500 & 2.65 & 453 & 8/4 & 20 &  4953 &  41.9 & 118 & \num{1.8e-5} & \num{1.1e-4} \\
+2800 & 2.95 & 453 & 8/4 & 30 & 17293 & 118.2 & 146 & \num{1.0e-5} & \num{4.5e-4} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{shared_basis_times.pdf}
+\caption{Times of Table~\ref{tab:shared-basis-time} on a logarithmic axis. ``Order 8/4'' is the truncation order 8 with the far order 4.}
+\label{fig:shared-basis-times}
+\end{figure}
+
+\paragraph{Limits and validated range.}
+The method needs one refractive index for all spheres of an aggregate.
+A new basis is needed for every geometry and wavelength.
+The floor of the residual grows with the monomer size, roughly as $x^4$ for small $x$ and faster above $x \approx 0.5$.
+It also grows with the refractive index.
+Over the ranges that were examined the floor is ordered by the product $|m|\,x$ of the largest monomer and the refractive index with the largest residual: \num{5e-5} at 1.0, \num{1.2e-4} at 1.2, \num{1.4e-3} at 1.8 and \num{1.4e-2} at 2.5.
+More terms of the remainder and a refitted shift function do not lower it.
+The error of the forward amplitudes is 0.25 to 0.6 times the floor and that of the backward amplitudes 2 to 3 times the floor.
+
+Figure~\ref{fig:shared-basis-limits} shows the error of the basis alone as a function of the mean monomer size parameter for four ranges of the refractive index.
+Table~\ref{tab:shared-basis-limits} gives the mean size parameter up to which the error stays below $10^{-3}$ and $10^{-2}$.
+The truncation order is the contact order of Sec.~\ref{sec:contact-order} with $\epsilon = 10^{-2}$, the largest over the range.
+The test geometry is the central 60 spheres of an aggregate with $D_f = 2.65$, with direct translation.
+Whole aggregates are treated below.
+The radii have a relative standard deviation of 0.1 and the largest sphere is 1.22 times the mean.
+The values are interpolated between the size parameters that were computed.
+Inside these limits the basis size is 12 to 24.
+Metal spheres were left out of the scope of the method.
+In point contact they have no converged truncation order (Table~\ref{tab:contact-orders}), and with gaps of 5 to \SI{10}{\percent} the basis needs 100 to more than 250 vectors.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{shared_basis_limits.pdf}
+\caption{Relative error of the shared-basis sweep without the fallback in $S_1$, $S_2$ against CBICG solutions with $\varepsilon = 10^{-14}$, as a function of the mean monomer size parameter. The largest error over four refractive indices of each range is shown, one of them the refractive index with the largest residual. The horizontal lines mark the errors $10^{-3}$ and $10^{-2}$ of Table~\ref{tab:shared-basis-limits}. Conditions as in that table. With the fallback the results meet the tolerance of the solver at every size parameter.}
+\label{fig:shared-basis-limits}
+\end{figure}
+
+\paragraph{Whole aggregates.}
+Table~\ref{tab:shared-basis-whole} repeats the test for whole aggregates of 350, 1500 and 2800 monomers with the wider black-carbon range ($1.45 \leq \mathrm{Re}\,m \leq 2.55$, $0.35 \leq \mathrm{Im}\,m \leq 1.55$).
+The translation uses the FFT with the far order 6, and the reference solutions use the same operator.
+The errors are the largest over two refractive indices, one of them the refractive index with the largest residual.
+For the whole aggregates they are the errors of the largest basis tested, which has 64 vectors and 96 vectors for $N_p = 2800$.
+The forward amplitudes of the whole aggregates are as accurate as those of the fragment or more accurate, so the forward limits of Table~\ref{tab:shared-basis-limits} hold for them.
+The backward amplitudes are less accurate.
+From a mean size parameter of 0.5 their error lies between \num{2e-3} and \num{1.4e-2} for the whole aggregates.
+This is a property of the backward amplitude of a large aggregate and not of the shared basis alone.
+The CBICG solution with $\varepsilon = 10^{-6}$ differs from the reference in the backward amplitudes by \num{1.5e-2} for $N_p = 1500$ and $x = 0.5$.
+For $N_p = 2800$ it differs by \num{5.7e-3} at $x = 0.5$ and by \num{1.6e-2} at $x = 0.6$.
+A smaller tolerance is needed in both methods when backward amplitudes of large aggregates with such monomers are required.
+The basis size grows from 16 for the fragment to 24 to 64 for the whole aggregates.
+For $N_p = 2800$ the residual is within a factor of two of its floor at 48 vectors, but the backward amplitudes settle only with 64 to 96 vectors.
+With 64 vectors their error is \num{2.0e-3} at $x = 0.5$ and \num{1.5e-2} at $x = 0.6$.
+
+\begin{table}[htbp]
+\caption{Relative error of the shared-basis sweep without the fallback in $S_1$, $S_2$ for the fragment of Table~\ref{tab:shared-basis-limits} ($N_p = 60$) and for whole aggregates, with the wider black-carbon range and the truncation orders 10 to 11. $K$ is the basis size at which the residual stops falling.}
+\label{tab:shared-basis-whole}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} rrcrrr @{}}
+\toprule
+$N_p$ & $D_f$ & Mean $x$ & $K$ & Forward & Backward \\
+\midrule
+  60 & 2.65 & 0.4 & 16 & \num{9.1e-5} & \num{4.3e-4} \\
+1500 & 2.65 & 0.4 & 24 & \num{8.5e-5} & \num{5.3e-4} \\
+\midrule
+  60 & 2.65 & 0.5 & 16 & \num{4.1e-4} & \num{1.9e-3} \\
+ 350 & 2.65 & 0.5 & 24 & \num{4.7e-4} & \num{2.0e-3} \\
+1500 & 2.65 & 0.5 & 32 & \num{2.2e-4} & \num{1.4e-2} \\
+1500 & 2.35 & 0.5 & 24 & \num{4.1e-4} & \num{5.7e-3} \\
+2800 & 2.95 & 0.5 & 64 & \num{1.8e-4} & \num{1.8e-3} \\
+\midrule
+  60 & 2.65 & 0.6 & 16 & \num{1.2e-3} & \num{7.2e-3} \\
+ 350 & 2.65 & 0.6 & 24 & \num{8.3e-4} & \num{1.4e-2} \\
+1500 & 2.65 & 0.6 & 32 & \num{4.2e-4} & \num{9.8e-3} \\
+1500 & 2.35 & 0.6 & 32 & \num{1.0e-3} & \num{1.1e-2} \\
+2800 & 2.95 & 0.6 & 64 & \num{2.1e-4} & \num{9.0e-3} \\
+\midrule
+  60 & 2.65 & 0.7 & 16 & \num{2.7e-3} & \num{4.5e-2} \\
+1500 & 2.65 & 0.7 & 48 & \num{7.1e-4} & \num{1.3e-2} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The code issues a warning when a sweep lies outside the range
+\begin{equation}
+  1.30 \leq \mathrm{Re}\,m \leq 3.00, \qquad 0 \leq \mathrm{Im}\,m \leq 1.65, \qquad
+  \max|m| \, \max_i x_i \leq 1.6
+  \label{eq:shared-basis-range}
+\end{equation}
+(function \texttt{shared\_basis\_range\_issues}).
+Inside it the basis alone gave errors below \num{2e-4} in the forward amplitudes and below $10^{-3}$ in the backward amplitudes in all cases of Table~\ref{tab:shared-basis-limits} and in the one case of Table~\ref{tab:shared-basis-whole} that lies inside it ($N_p = 1500$, $x = 0.4$).
+The limits of that table lie outside this range because they refer to the larger errors $10^{-3}$ and $10^{-2}$.
+
+\begin{table}[htbp]
+\caption{Mean monomer size parameter up to which the relative error of the shared-basis sweep in $S_1$, $S_2$ stays below the given value. The value in parentheses is extrapolated.}
+\label{tab:shared-basis-limits}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} llccccc @{}}
+\toprule
+ & & & \multicolumn{2}{c}{Forward} & \multicolumn{2}{c}{Backward} \\
+\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+$\mathrm{Re}\,m$ & $\mathrm{Im}\,m$ & Order & $10^{-3}$ & $10^{-2}$ & $10^{-3}$ & $10^{-2}$ \\
+\midrule
+1.45 to 2.25 & 0.35 to 1.25 & 7 to 8  & 0.70 & (1.1) & 0.55 & 0.70 \\
+1.45 to 2.55 & 0.35 to 1.55 & 9 to 11 & 0.58 & 0.95  & 0.45 & 0.60 \\
+1.30 to 1.70 & 0            & 3 to 5  & 1.2  & 2.0   & 1.1  & 1.3  \\
+2.00 to 3.00 & 0            & 7 to 9  & 0.60 & 0.85  & 0.50 & 0.70 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Incident plane wave coefficients}
 \label{sec:incident}
@@ -737,6 +1037,7 @@ The present functions return the forward amplitudes only.
   3 & Build T-matrix & lr\_tran basis, per sphere & \texttt{TMatrixSolver.jl} \\
   4 & Incident field & $\bm{p}_\mathrm{inc}$ ($m = \pm 1$ terms) & \texttt{TMatrixSolver.jl} \\
   5 & CBICG solve & $(\mathbf{I} - \mathbf{T}\mathbf{A})\bm{x} = \mathbf{T}\bm{p}_\mathrm{inc}$; warm-start from previous $m$ (\S\ref{sec:continuation}) & \texttt{TMatrixSolver.jl} \\
+  5' & Shared basis (optional) & all $m$ of an aggregate in one Krylov basis (\S\ref{sec:shared-basis}) & \texttt{SharedBasisSweep.jl} \\
   6 & Common origin & Translate coefficients & \texttt{ScatteringAmplitude.jl} \\
   7 & Amplitudes & $S_1$--$S_4$ at $\theta = 0^\circ, 180^\circ$ & \texttt{ScatteringAmplitude.jl} \\
   8 & Efficiencies & $Q_\mathrm{ext}$, $Q_\mathrm{sca}$, $Q_\mathrm{abs}$ & \texttt{ScatteringAmplitude.jl} \\
@@ -765,6 +1066,7 @@ The present functions return the forward amplitudes only.
   CBICG solver & \eqref{eq:global-system}, \eqref{eq:adjoint-symmetry}, Table~\ref{tab:cbicg} & \texttt{\_solve\_bicg} & \texttt{TMatrixSolver.jl} \\
   GMRES solver (optional) & \eqref{eq:global-system}, \eqref{eq:krylov-subspace}, Table~\ref{tab:gmres} & \texttt{gmres} (Krylov.jl) & \texttt{TMatrixSolver.jl} \\
   RI continuation (\S\ref{sec:continuation}) & --- & \texttt{initial\_amn} kwarg & \texttt{TMatrixSolver.jl}, \texttt{ParameterSweep.jl} \\
+  Shared Krylov basis (\S\ref{sec:shared-basis}) & \eqref{eq:inverse-form}--\eqref{eq:shared-basis-range} & \texttt{sweep\_refractive\_index}, \texttt{shared\_basis\_range\_issues}, option \texttt{shared\_basis} & \texttt{SharedBasisSweep.jl}, \texttt{ParameterSweep.jl} \\
   Incident coefficients & \eqref{eq:pinc-q1}--\eqref{eq:pinc-q2} & \texttt{\_genplanewavecoef\_z0} & \texttt{TMatrixSolver.jl} \\
   Common-origin expansion & \eqref{eq:common-origin}--\eqref{eq:mode-transform} & \texttt{\_merge\_to\_origin!} & \texttt{ScatteringAmplitude.jl} \\
   BH83 amplitudes $S_1$--$S_4$ & \eqref{eq:bh83-amplitude}--\eqref{eq:amplitude-sum} & \texttt{\_amplitude\_from\_mode\_coefs} & \texttt{ScatteringAmplitude.jl} \\
@@ -791,7 +1093,9 @@ The present functions return the forward amplitudes only.
 \label{sec:references}
 
 \begin{enumerate}[nosep]
+  \item Argentin, C., Inzhevatkin, K.G.\ \& Yurkin, M.A.\ (2026). Efficient refractive-index sweeps in the discrete dipole approximation using shifted Krylov methods. arXiv:2611.15909.
   \item Bohren, C.F.\ \& Huffman, D.R.\ (1983). \textit{Absorption and Scattering of Light by Small Particles}. Wiley. [BH83]
+  \item Frommer, A.\ \& Gl\"assner, U.\ (1998). Restarted GMRES for shifted linear systems. \textit{SIAM J.\ Sci.\ Comput.}, 19(1), 15--26.
   \item Mackowski, D.W.\ (1991). Analysis of radiative scattering for multiple sphere configurations. \textit{Proc.\ R.\ Soc.\ Lond.\ A}, 433, 599--614.
   \item Mackowski, D.W.\ (1994). Calculation of total cross sections of multiple-sphere clusters. \textit{JOSA A}, 11(11), 2851--2861.
   \item Mackowski, D.W.\ (1996). Calculation of the total scattering cross section and the total absorbed energy for the multiple sphere clusters. \textit{JOSA A}, 13(11), 2266--2278.

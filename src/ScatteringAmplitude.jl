@@ -33,6 +33,45 @@ end
 # Reference: Mackowski & Mishchenko MSTM v4.0, subroutine tranordertest.
 # ─────────────────────────────────────────────────────────────
 
+# Tables of _tranordertest. They depend on lmax only, through nbc, and are read-only once
+# built. The lock makes the lookup safe when several threads call _tranordertest.
+const _TRANORDER_TABLES = Dict{Int, Tuple{Vector{Float64}, Matrix{Float64}}}()
+const _TRANORDER_LOCK   = ReentrantLock()
+
+"""
+    _tranorder_tables(nbc::Int) -> (fnr, bcof)
+
+Square roots `fnr[j] = sqrt(j - 1)` and coefficients `bcof[a+1, b+1] = sqrt((a+b)! / (a! b!))`
+for a, b = 0..nbc, as `_tranordertest` uses them. Built on the first call for a given `nbc`
+and returned from a cache afterwards. The arithmetic is that of the earlier in-line code, so
+the values are identical.
+"""
+function _tranorder_tables(nbc::Int)::Tuple{Vector{Float64}, Matrix{Float64}}
+    return lock(_TRANORDER_LOCK) do
+        get!(_TRANORDER_TABLES, nbc) do
+            # fnr[j] = sqrt(j-1)  (1-indexed, mirrors Fortran fnr(0..2*nbc) = sqrt(0..2*nbc))
+            fnr = Vector{Float64}(undef, 2 * nbc + 2)
+            fnr[1] = 0.0
+            for j in 2:length(fnr)
+                fnr[j] = sqrt(Float64(j - 1))
+            end
+            F(k) = fnr[k + 1]   # F(k) = sqrt(k)
+
+            # bcof[a+1, b+1] = sqrt((a+b)! / (a! * b!))  (Fortran bcof(0:nbc, 0:nbc))
+            bcof = zeros(Float64, nbc + 1, nbc + 1)
+            bcof[1, 1] = 1.0
+            for n in 0:nbc-1
+                for l in n+1:nbc
+                    bcof[n+1, l+1] = F(n + l) * bcof[n+1, l] / F(l)
+                    bcof[l+1, n+1] = bcof[n+1, l+1]
+                end
+                bcof[n+2, n+2] = F(2n+2) * F(2n+1) * bcof[n+1, n+1] / F(n+1)^2
+            end
+            (fnr, bcof)
+        end
+    end
+end
+
 function _tranordertest(r::Float64, lmax::Int, eps::Float64 = 1e-5)::Int
     r < 1e-10 && return lmax
 
@@ -40,25 +79,11 @@ function _tranordertest(r::Float64, lmax::Int, eps::Float64 = 1e-5)::Int
     notd = nlim + lmax
     nbc  = 2 * notd + 4   # max bcof index needed ≤ 2*notd+1; +4 safety margin
 
-    # fnr[j] = sqrt(j-1)  (1-indexed, mirrors Fortran fnr(0..2*nbc) = sqrt(0..2*nbc))
-    fnr = Vector{Float64}(undef, 2 * nbc + 2)
-    fnr[1] = 0.0
-    for j in 2:length(fnr)
-        fnr[j] = sqrt(Float64(j - 1))
-    end
+    # fnr[j] = sqrt(j-1) and bcof[a+1, b+1] = sqrt((a+b)! / (a! * b!)) depend on lmax only.
+    # They are built once per nbc and reused (see _tranorder_tables).
+    fnr, bcof = _tranorder_tables(nbc)
     # Convenience: access fnr as if 0-indexed
     F(k) = fnr[k + 1]   # F(k) = sqrt(k)
-
-    # bcof[a+1, b+1] = sqrt((a+b)! / (a! * b!))  (Fortran bcof(0:nbc, 0:nbc))
-    bcof = zeros(Float64, nbc + 1, nbc + 1)
-    bcof[1, 1] = 1.0
-    for n in 0:nbc-1
-        for l in n+1:nbc
-            bcof[n+1, l+1] = F(n + l) * bcof[n+1, l] / F(l)
-            bcof[l+1, n+1] = bcof[n+1, l+1]
-        end
-        bcof[n+2, n+2] = F(2n+2) * F(2n+1) * bcof[n+1, n+1] / F(n+1)^2
-    end
     B(a, b) = (a >= 0 && b >= 0 && a <= nbc && b <= nbc) ? bcof[a+1, b+1] : 0.0
 
     # ── Inner function: vcfunc(m=-1, n, k=1, l) ───────────────────────────────

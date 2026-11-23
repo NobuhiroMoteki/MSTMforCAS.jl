@@ -12,6 +12,7 @@ under plane wave incidence.
 - `TranslationCoefs`: Vector spherical wave function translation coefficients
 - `TMatrixSolver`: Multi-sphere interaction equation solver
 - `ScatteringAmplitude`: Forward/backward amplitudes and cross sections
+- `SharedBasisSweep`: Refractive-index sweep of one aggregate with a shared Krylov basis
 - `TruncationOrder`: Truncation order for near-touching monomers from a two-sphere preliminary calculation
 - `AggregateIO`: Read aggregate geometry files (aggregate_generator_PTSA format)
 - `ParameterSweep`: Orchestrate parameter sweeps with parallel execution
@@ -37,6 +38,7 @@ include("TranslationCoefs.jl")
 include("FFTTranslation.jl")
 include("TMatrixSolver.jl")
 include("ScatteringAmplitude.jl")
+include("SharedBasisSweep.jl")
 include("TruncationOrder.jl")
 include("ClusterTMatrix.jl")
 include("AggregateIO.jl")
@@ -45,6 +47,8 @@ include("ParameterSweep.jl")
 # Re-export primary public API
 export compute_mie_coefficients
 export compute_scattering           # single aggregate, single refractive index
+export sweep_refractive_index       # single aggregate, many refractive indices (shared Krylov basis)
+export shared_basis_range_issues    # validated range of the shared-basis sweep
 export run_parameter_sweep          # batch computation
 export write_results_hdf5          # write DataFrame to HDF5
 export read_aggregate_file          # I/O: .ptsa/.pos text files
