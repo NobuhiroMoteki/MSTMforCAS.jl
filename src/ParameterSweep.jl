@@ -69,6 +69,16 @@ Configuration for a parameter sweep computation.
   orders that `truncation_eps` or `truncation_order` add.
 - `fft_near_factor::Float64`: Near-pair criterion for `fft_far_order` (default 1.5). Spheres
   are a near pair if their center distance is at most this factor times the sum of their radii.
+- `shared_basis::Bool`: Solve all refractive indices of an (aggregate, medium condition)
+  group with one shared Krylov basis (`sweep_refractive_index`) instead of one CBICG solve per
+  refractive index (default false = the behaviour of earlier versions). All spheres and all
+  refractive indices of a group then use one truncation order: the largest of the Mie orders,
+  of `truncation_order` and of the orders that `truncation_eps` selects over the refractive
+  index grid. Every row meets `convergence_epsilon`: refractive indices that the basis does
+  not resolve are solved by CBICG, started from the basis solution. The column `n_iterations`
+  holds the basis size, plus the CBICG iterations of such rows. A warning is issued if the
+  sweep lies outside the validated range (`shared_basis_range_issues`). Not available
+  together with `use_gpu` or with `solver = :gmres`.
 - `use_gpu::Bool`: Use GPU-accelerated batched solver via CUDA.jl extension (default false).
   Requires `using CUDA` before calling `run_parameter_sweep`. Implies `use_fft=true`.
 - `gpu_float32::Bool`: Use Float32 precision for GPU BiCG iterations (default false).
@@ -87,6 +97,7 @@ Base.@kwdef struct SweepConfig
     fft_far_order::Union{Int,Nothing} = nothing
     fft_near_factor::Float64 = 1.5
     solver::Symbol           = :cbicg   # :cbicg or :gmres
+    shared_basis::Bool       = false    # one Krylov basis per (aggregate, medium) group
     use_gpu::Bool            = false
     gpu_float32::Bool        = false
     # Hybrid GPU+CPU threshold: groups with n_monomers <= gpu_np_threshold are
@@ -196,6 +207,8 @@ function _h5_init!(path::String, config::SweepConfig)
         HDF5.attrs(fid)["fft_far_order"] =
             config.fft_far_order === nothing ? -1 : config.fft_far_order
         HDF5.attrs(fid)["fft_near_factor"] = config.fft_near_factor
+        # 1 = rows computed with the shared Krylov basis (one truncation order per group)
+        HDF5.attrs(fid)["shared_basis"] = config.shared_basis ? 1 : 0
 
         for (col, T) in _SWEEP_COLS
             HDF5.create_dataset(fid, col, HDF5.datatype(T),
@@ -343,6 +356,19 @@ function _read_fft_far_settings(path::String)::Tuple{Union{Int,Nothing},Float64}
     end
 end
 
+"""
+    _read_shared_basis(path::String) -> Bool
+
+Whether an existing results file was written with `shared_basis = true`. Files written
+before this attribute existed used one CBICG solve per refractive index (`false`).
+"""
+function _read_shared_basis(path::String)::Bool
+    return HDF5.h5open(path, "r") do fid
+        a = HDF5.attrs(fid)
+        haskey(a, "shared_basis") && Int(a["shared_basis"]) != 0
+    end
+end
+
 # ─────────────────────────────────────────────────────────────
 # Main sweep function
 # ─────────────────────────────────────────────────────────────
@@ -391,6 +417,11 @@ function run_parameter_sweep(
         return nothing
     end
 
+    if config.shared_basis
+        config.use_gpu && error("shared_basis = true is not available together with use_gpu = true")
+        config.solver == :cbicg || error("shared_basis = true needs solver = :cbicg")
+    end
+
     # ── Check for existing results (resume support) ──────────────────────────
     completed_keys = Set{Tuple{String, Float64, Float64, Float64, Float64}}()
 
@@ -407,6 +438,13 @@ function run_parameter_sweep(
         isequal(far_file, far_now) || error(
             "$(basename(output_h5)) was written with (fft_far_order, fft_near_factor) = " *
             "$(repr(far_file)), but this sweep uses $(repr(far_now)). " *
+            "Use a different output file.")
+        # The shared basis uses one truncation order per group, so its rows differ from
+        # those of the solve per refractive index at the level of the truncation error.
+        sb_file = _read_shared_basis(output_h5)
+        sb_file == config.shared_basis || error(
+            "$(basename(output_h5)) was written with shared_basis = $(sb_file), " *
+            "but this sweep uses shared_basis = $(config.shared_basis). " *
             "Use a different output file.")
         HDF5.h5open(output_h5, "r") do fid
             if haskey(fid, "source") && size(fid["source"], 1) > 0
@@ -468,7 +506,9 @@ function run_parameter_sweep(
         for ((ai, mci), mis) in group_list
             wl, n_med = config.medium_conditions[mci]
             xb = _x_bucket(aggregates[ai], 2π * n_med / wl)
-            for mi in mis
+            # The shared basis takes its order from the whole refractive index grid, so
+            # that a resumed sweep uses the same order as an uninterrupted one.
+            for mi in (config.shared_basis ? (1:n_mrel) : mis)
                 push!(key_set, (xb, ri_grid[mi] / n_med))
             end
         end
@@ -499,6 +539,29 @@ function run_parameter_sweep(
             use_fft=effective_use_fft, truncation_order=_order_for(ai0, mci0, mis0[1]),
             solver=config.solver, fft_far_order=config.fft_far_order,
             fft_near_factor=config.fft_near_factor)  # returns (ScatteringResult, amn); result discarded
+    end
+
+    # ── Shared basis: range check and caches for the largest order ──────────
+    n_sb_fallback = Threads.Atomic{Int}(0)
+    if config.shared_basis
+        x_max_all = 0.0
+        m_rel_all = ComplexF64[]
+        for (wl, n_med) in config.medium_conditions
+            k_mc = 2π * n_med / wl
+            x_max_all = max(x_max_all, k_mc * maximum(maximum(a.radii) for a in aggregates))
+            append!(m_rel_all, ri_grid ./ n_med)
+        end
+        issues = shared_basis_range_issues(m_rel_all, x_max_all)
+        isempty(issues) || @warn(
+            "shared_basis = true: the sweep lies outside the range in which the shared-basis " *
+            "sweep was validated: " * join(issues, "; ") * ". Every row still meets " *
+            "convergence_epsilon through the CBICG fallback, but the gain in time can be lost.")
+        # Largest order that any group can use, so that no thread grows the global caches.
+        ord_bound = maximum(mie_nmax(x_max_all, m) for m in m_rel_all)
+        config.truncation_order === nothing || (ord_bound = max(ord_bound, config.truncation_order))
+        isempty(order_table) || (ord_bound = max(ord_bound, maximum(values(order_table))))
+        nc_warm = _ensure_numconstants(ord_bound + 2)
+        _ensure_tran_coef(ord_bound, nc_warm.fnr, nc_warm.bcof)
     end
 
     # ── Weighted ETA: estimate total work using cost proxy per job ───────────
@@ -543,8 +606,31 @@ function run_parameter_sweep(
         # Precompute FFT grid once per (aggregate, medium_condition) group
         # With fft_far_order the grid is also built for a single refractive index, so that
         # a resumed sweep uses the same operator as an uninterrupted one.
+        # Shared basis: one order for the group, from the whole refractive index grid
+        use_sb_here = config.shared_basis && agg.n_monomers >= 2
+        local sb_order::Int = 0
+        local sb_mie::Int = 0
         local fft_cache::Union{FFTGridData, Nothing} = nothing
-        if effective_use_fft && agg.n_monomers >= 2 &&
+        if use_sb_here
+            positions_sb = agg.positions .* k
+            radii_sb     = agg.radii     .* k
+            for m_abs in ri_grid, s in 1:length(radii_sb)
+                sb_mie = max(sb_mie, mie_nmax(radii_sb[s], m_abs / n_med))
+            end
+            sb_order = sb_mie
+            for mi in 1:n_mrel
+                o = _order_for(ai, mci, mi)
+                o === nothing || (sb_order = max(sb_order, o))
+            end
+            if effective_use_fft
+                nois_sb = fill(sb_order, length(radii_sb))
+                far_sb  = config.fft_far_order === nothing ? sb_order :
+                          min(sb_order, max(config.fft_far_order, sb_mie))
+                fft_cache = init_fft_grid(positions_sb, radii_sb, nois_sb;
+                                          far_nois=fill(far_sb, length(radii_sb)),
+                                          near_factor=config.fft_near_factor)
+            end
+        elseif effective_use_fft && agg.n_monomers >= 2 &&
            (length(mi_list) > 1 || config.fft_far_order !== nothing)
             positions_x = agg.positions .* k
             radii_x     = agg.radii     .* k
@@ -687,6 +773,18 @@ function run_parameter_sweep(
                  truncation_order=order_gpu,
                  float32=config.gpu_float32,
                  on_result=_on_gpu_result))
+        elseif use_sb_here
+            # ── CPU path with one Krylov basis for all refractive indices ──
+            m_abs_list = [ri_grid[mi] for mi in mi_list]
+            res_sb, info_sb = sweep_refractive_index(agg.positions .* k, agg.radii .* k,
+                m_abs_list ./ n_med;
+                tol=config.convergence_epsilon, max_iter=config.max_iterations,
+                use_fft=effective_use_fft, truncation_order=sb_order,
+                precomputed_fft=fft_cache, warn_range=false, max_mie_order=sb_mie)
+            Threads.atomic_add!(n_sb_fallback, info_sb.n_fallback)
+            for (jj, m_abs) in enumerate(m_abs_list)
+                _record_one!(res_sb[jj], m_abs; force_flush=(jj == length(m_abs_list)))
+            end
         else
             # ── CPU sequential path (continuation method) ─────────────────
             local prev_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
@@ -744,6 +842,10 @@ function run_parameter_sweep(
         end
     end
     println()  # end progress line
+    if config.shared_basis
+        @info @sprintf("Shared basis: %d of %d rows were solved by the CBICG fallback",
+                       n_sb_fallback[], n_jobs)
+    end
 
     return nothing
 end

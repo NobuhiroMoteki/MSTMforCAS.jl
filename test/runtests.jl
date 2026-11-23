@@ -8,6 +8,8 @@ using MSTMforCAS
     include("test_truncation_order.jl")    # truncation order for near-touching monomers
     include("test_fft_translation.jl")     # FFT grid with far orders below the sphere orders
     include("test_parameter_sweep.jl")     # sweep wiring of truncation_eps and fft_far_order
+    include("test_shared_basis.jl")        # refractive-index sweep with a shared Krylov basis
+    include("test_tranordertest.jl")       # translation order test with cached tables
     # include("test_translation_coefs.jl")   # uncomment as implemented
     # include("test_tmatrix_solver.jl")
     # include("test_scattering_amplitude.jl")
