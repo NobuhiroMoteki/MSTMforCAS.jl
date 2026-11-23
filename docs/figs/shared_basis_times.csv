@@ -1,0 +1,11 @@
+# Sweep over 195 or 196 refractive indices of one aggregate on one thread (Xeon E5-2620 v4), FFT translation, setup included.
+# MSTMforCAS.jl v1.2.0. t_cbicg: grid setup plus compute_scattering with tol 1e-6 and cold start, extrapolated from three refractive indices.
+# order 8/4 = truncation order 8, FFT far order 4. Errors of sweep_refractive_index against compute_scattering with tol 1e-14.
+n_monomers,Df,wavelength_nm,order,basis_size,t_cbicg_s,t_shared_s,err_forward,err_backward
+1500,2.65,834,3,14,1016,11.0,1.6e-5,2.7e-5
+1500,2.65,453,3,18,1316,12.6,2.3e-5,2.1e-4
+2800,2.95,453,3,27,2837,24.4,8.7e-6,1.2e-3
+2800,2.35,453,3,18,5914,42.2,2.3e-5,2.4e-4
+1500,2.65,834,8/4,16,3913,36.8,1.6e-5,3.4e-5
+1500,2.65,453,8/4,20,4953,41.9,1.8e-5,1.1e-4
+2800,2.95,453,8/4,30,17293,118.2,1.0e-5,4.5e-4
