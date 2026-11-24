@@ -111,7 +111,7 @@ def figure_limits():
 
 def figure_times():
     rows = read_csv("shared_basis_times.csv")
-    names = [f"$N_p$ {r['n_monomers']}, $D_f$ {r['Df']}, {r['wavelength_nm']} nm, order {r['order']}"
+    names = [f"$N$ = {r['n_monomers']}, $D_f$ = {r['Df']}, {r['wavelength_nm']} nm, order {r['order']}"
              for r in rows]
     fig, ax = plt.subplots(figsize=(6.9, 2.9))
     style_axes(ax)

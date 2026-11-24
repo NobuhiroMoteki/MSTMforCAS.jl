@@ -580,6 +580,8 @@ One aggregate, 195 or 196 refractive indices (1.35 ≤ Re m ≤ 2.95, 0.15 ≤ I
 
 ![Time of the shared-basis sweep and of CBICG for seven aggregates](docs/figs/shared_basis_times.png)
 
+In the figure N is the number of monomers (Np).
+
 In a parameter sweep (`shared_basis = true`, six threads, six aggregates × 100 refractive indices, uniform order 3) the gain against the default with continuation was a factor of 28 for Np = 1500 at 834 nm (17.6 s against 485 s) and a factor of 20 for Np = 350 at 453 nm (3.4 s against 67 s). All rows converged without the fallback. The factors are smaller than in the table because the sweep has half as many refractive indices and the default starts every solve from the previous solution.
 
 The stage that is repeated for every refractive index takes 5 ms (first row) to 95 ms (last row) per refractive index, so the speed-up grows with the number of refractive indices. In an earlier test with a prototype of the method, twelve processes at once on a 24-thread desktop each ran at about 55 % of the single-process speed. With the default tolerance the CBICG results themselves differ from the tight solutions by 2e-4 to 5e-4 in the forward amplitudes and by up to 2 % in the backward amplitudes of the larger aggregates.

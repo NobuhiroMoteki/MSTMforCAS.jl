@@ -14,6 +14,47 @@ have results from an earlier version. The sections after it list all changes by 
 | 0.4.4 | all before 0.4.4 | The regular spherical Bessel function `j_n(z)` in the translation matrix was computed by an unstable upward recurrence. | Forward and backward amplitudes of aggregates of sub-wavelength spheres when the truncation order is well above the size parameter (for example order 8 or more at x ≈ 0.3). The values were too large by orders of magnitude. `Q_ext` and the solver were not affected. | Recompute such cases. Calculations with the automatic truncation order used low orders at small x. |
 | 0.4.2 | all before 0.4.2 | The Riccati–Bessel function `ψ_n(x)` of the Mie coefficients was computed by an unstable upward recurrence for x < 1. | Mie coefficients of high order for sub-wavelength spheres (for example `a_7` at x ≈ 0.3), and the amplitudes computed with a truncation order of 7 or more for such spheres. | Recompute such cases. |
 
+## Unreleased
+
+Documents and one test. No function and no numerical result changes.
+
+### Added
+
+- `test/test_fortran_unequal_radii.jl`: regression test against the Fortran code for aggregates
+  with unequal monomer radii (20 and 100 monomers, two refractive indices, direct translation,
+  tolerance 1e-12), with the fixtures `test/fixtures/aggregate_unequal_radii_Np*.ptsa`. The
+  three test cases of the Fortran distribution have equal spheres only.
+
+### Documents
+
+- Theory note (`docs/theory_note.pdf`) revised on 2026-11-24.
+  - New parts: a table of notation, the derivation of the T-matrix block with its eigenvalues
+    and inverse, the basis of the affine form behind the shared-basis sweep, the algorithm of
+    the shared-basis sweep as a table, and a section on the validation against the Fortran code.
+  - The shared-basis sweep is now a section of its own. The incident coefficients moved to the
+    section on the interaction equation. The flow summary and the implementation mapping are
+    one section.
+  - The section on the translation matrix was rewritten. The package uses the one-step form of
+    the addition theorem. The earlier text named the rotation, axial translation, rotation
+    factorisation, which the package does not use. Both forms give the same matrix.
+  - Corrections of the text: mode 1 is the TM mode and mode 2 the TE mode (the earlier text had
+    them reversed), the sign in the definition of the Riccati–Bessel function of the second
+    kind, the recurrence used for the first kind (Miller's downward recurrence since 0.4.2),
+    the convergence test of CBICG (Euclidean norm), and the references (Mackowski & Mishchenko
+    1996, Mackowski & Kolokolova 2022).
+- Validation recorded in the theory note. With direct translation the amplitudes and `Q_ext`
+  agree with the Fortran output to its printed precision, for the three test cases and for
+  aggregates with unequal monomer radii (20 to 504 monomers, relative standard deviation of the
+  radii 0.08 to 0.10). Two points to note for users:
+  - `Q_abs` is computed as `Q_ext - Q_sca` and carries the absolute error of `Q_ext`. For weakly
+    absorbing aggregates the default tolerance leaves an error of up to a few times 1e-3 in
+    `Q_abs`, and the FFT translation an error of about 1e-2. Use a smaller tolerance and direct
+    translation when `Q_abs` of such aggregates is needed to better than a percent.
+  - For an aggregate of 20 monomers the FFT translation differs from direct translation by up to
+    1.7e-3 in the forward and 6.7e-3 in the backward amplitudes.
+- A comment in `src/TMatrixSolver.jl` named the modes of the Mie coefficients the wrong way
+  round. Only the comment changed.
+
 ## 1.2.0 (2026-11-23)
 
 No result of an existing option changes. The new method is off by default.

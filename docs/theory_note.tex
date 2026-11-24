@@ -18,15 +18,15 @@
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-11-23 (MSTMforCAS.jl v1.2.0)}
+\date{Last updated: 2026-11-24 (MSTMforCAS.jl v1.2.0)}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-This document provides a self-contained description of the mathematical theory behind the Multi-Sphere T-Matrix (MSTM) method as implemented in MSTMforCAS.jl.
-It covers the VSWF expansion formalism, Lorenz--Mie theory for single spheres, the multi-sphere interaction equation, VSWF translation addition theorem, the Complex BiConjugate Gradient (CBICG) iterative solver, the FFT-accelerated translation algorithm, and the output quantities (scattering amplitudes and cross-section efficiencies).
-The implementation follows the formulation of Mackowski (1991, 1994, 1996), Xu (1996), Mackowski \& Mishchenko (2011), and Mackowski \& Kolokolova (2022).
+This document describes the theory behind the Multi-Sphere T-Matrix (MSTM) method as implemented in MSTMforCAS.jl and the numerical methods of the package.
+It covers the VSWF expansion in the left--right circular basis, Lorenz--Mie theory for single spheres, the multi-sphere interaction equation with its translation matrices and their FFT acceleration, the truncation order for touching spheres, the iterative solvers (CBICG, GMRES, continuation in the refractive index, GPU batches), the sweep of the refractive index with a shared Krylov basis, the output quantities (scattering amplitudes and cross-section efficiencies), the cluster T-matrix for many orientations, and the validation against the Fortran reference code.
+The implementation follows Mackowski (1991, 1994, 2014), Mackowski \& Mishchenko (1996, 2011), Xu (1996) and Mackowski \& Kolokolova (2022).
 Scattering amplitude conventions follow Bohren \& Huffman (1983, hereafter BH83).
 \end{abstract}
 
@@ -39,6 +39,7 @@ Scattering amplitude conventions follow Bohren \& Huffman (1983, hereafter BH83)
 \subsection{Geometry and incident field}
 
 Consider $N_S$ homogeneous, non-overlapping spheres embedded in an infinite, lossless, homogeneous medium of real refractive index $n_\mathrm{med}$.
+The aggregate catalogue and the code call this number \texttt{Np}.
 Sphere $i$ ($i = 1, \dots, N_S$) has centre position $\bm{r}_i$, radius $a_i$, and complex refractive index $m_\mathrm{sphere}$ (common to all spheres in the parameter-sweep mode of this code).
 A time-harmonic plane wave ($e^{-i\omega t}$ convention, following BH83) propagates along the $+z$ axis in the medium with vacuum wavelength $\lambda_0$ and wavenumber in the medium
 \begin{equation}
@@ -59,32 +60,86 @@ The volume-equivalent sphere radius $a_\mathrm{eff}$ and its size parameter $x_\
 These appear in the normalisation of cross-section efficiencies (Sec.~\ref{sec:output}).
 
 \subsection{Vector spherical wave function expansion}
+\label{sec:vswf}
 
-The electromagnetic field in each region is expanded in vector spherical wave functions (VSWFs) $\bm{M}_{mn}^{(\nu)}$, $\bm{N}_{mn}^{(\nu)}$ of degree $m$ and order $n$ ($n = 1, 2, \dots$; $m = -n, \dots, n$), where $\nu = 1$ denotes regular (Bessel $j_n$) waves and $\nu = 3$ denotes outgoing (Hankel $h_n^{(1)}$) waves.
+The electromagnetic field in each region is expanded in vector spherical wave functions (VSWFs) $\bm{N}_{mn,1}^{(\nu)}$ and $\bm{N}_{mn,2}^{(\nu)}$ of order $n = 1, 2, \dots$ and degree $m = -n, \dots, n$.
+The superscript $\nu = 1$ denotes regular waves (spherical Bessel function $j_n$) and $\nu = 3$ outgoing waves (spherical Hankel function $h_n^{(1)}$).
+The last subscript is the mode.
+Mode 1 is the TM mode, which has no radial magnetic field (electric type).
+Mode 2 is the TE mode, which has no radial electric field (magnetic type).
+These names are those of BH83 (Sec.~4.3.2 and Fig.~4.4), where the electric field of a TM mode is proportional to the function $\bm{N}$ and that of a TE mode to the function $\bm{M}$.
+The numbering of the modes is that of Mackowski (1994) and of the MSTM code.
 The normalisation convention for these VSWFs follows that of Mishchenko et al.\ (2002) and Mackowski (1994).
+
 The scattered field from sphere $i$ is expanded in outgoing VSWFs centred at $\bm{r}_i$:
 \begin{equation}
   \bm{E}_\mathrm{sca}^{(i)}(\bm{r}) = \sum_{n=1}^{N_i} \sum_{m=-n}^{n}
-  \left[ a_{mn}^{(i)}\,\bm{M}_{mn}^{(3)}(\bm{r} - \bm{r}_i)
-       + b_{mn}^{(i)}\,\bm{N}_{mn}^{(3)}(\bm{r} - \bm{r}_i) \right]
+  \left[ c_{mn,1}^{(i)}\,\bm{N}_{mn,1}^{(3)}(\bm{r} - \bm{r}_i)
+       + c_{mn,2}^{(i)}\,\bm{N}_{mn,2}^{(3)}(\bm{r} - \bm{r}_i) \right]
   \label{eq:sca-expansion}
 \end{equation}
-where $N_i$ is the truncation order for sphere $i$.
-The field exciting sphere $i$ --- the incident plane wave plus the scattered fields from all other spheres --- is likewise expanded in regular VSWFs $\bm{M}_{mn}^{(1)}, \bm{N}_{mn}^{(1)}$ centred at $\bm{r}_i$.
+where $N_i$ is the truncation order for sphere $i$ and $c_{mn,1}^{(i)}$, $c_{mn,2}^{(i)}$ are the mode coefficients.
+The field exciting sphere $i$ --- the incident plane wave plus the scattered fields from all other spheres --- is likewise expanded in regular VSWFs centred at $\bm{r}_i$.
 
 \subsection{Left--right circular (lr\_tran) basis}
+\label{sec:lr-basis}
 
-Following Mackowski (1996, \S 2), the code works in the left--right circular VSWF basis obtained by the linear combinations
+Following Mackowski (2014, Eqs.~13 and 14), the code works in the left--right circular VSWF basis obtained by the linear combinations
 \begin{equation}
   \tilde{\bm{N}}_{mn,L}^{(\nu)} = \bm{N}_{mn,1}^{(\nu)} + \bm{N}_{mn,2}^{(\nu)}, \qquad
-  \tilde{\bm{N}}_{mn,R}^{(\nu)} = \bm{N}_{mn,1}^{(\nu)} - \bm{N}_{mn,2}^{(\nu)}
+  \tilde{\bm{N}}_{mn,R}^{(\nu)} = \bm{N}_{mn,1}^{(\nu)} - \bm{N}_{mn,2}^{(\nu)}.
   \label{eq:lr-basis}
 \end{equation}
-where the subscripts 1, 2 refer to the TE and TM modes.
-The fundamental mathematical advantage of this basis is that it completely decouples the translation matrix $\mathbf{H}_{ij}$ between the two polarisation blocks.
-While the single-sphere T-matrix is diagonal in the combined multipole index $mn = n(n+1) + m$ in both the standard TE/TM and lr\_tran bases, in the lr\_tran basis it couples the two polarisation blocks (labeled $p = 1$ for left and $p = 2$ for right).
-This structure greatly simplifies the multi-sphere interaction equations, as the computationally expensive translation operations can be performed independently for each polarisation block.
+The block index $p = 1, 2$ stands for $L$, $R$, and $\tilde{\bm{N}}_{mn,p}^{(\nu)}$ denotes the two functions.
+With the lr\_tran coefficients $a_{mn,p}^{(i)}$ the field of Eq.~\eqref{eq:sca-expansion} is $\sum_{n,m,p} a_{mn,p}^{(i)}\,\tilde{\bm{N}}_{mn,p}^{(3)}$, so that
+\begin{equation}
+  c_{mn,1}^{(i)} = a_{mn,1}^{(i)} + a_{mn,2}^{(i)}, \qquad
+  c_{mn,2}^{(i)} = a_{mn,1}^{(i)} - a_{mn,2}^{(i)}.
+  \label{eq:lr-coefficient-relation}
+\end{equation}
+The MSTM code uses the same relation (routine \texttt{lr\_mode\_transformation}).
+The vector $\bm{a}^{(i)}$ collects the $2N_i(N_i+2)$ coefficients $a_{mn,p}^{(i)}$ of sphere $i$, ordered by $p$ and then by the combined index $mn = n(n+1) + m$.
 
+Two properties make this basis convenient.
+The translation of VSWFs between two origins does not couple the two blocks (Mackowski 2014; Sec.~\ref{sec:translation}).
+The T-matrix of a sphere couples only the two blocks of the same pair $(m, n)$ (Sec.~\ref{sec:mie}).
+The expensive translation can therefore be carried out for each block separately.
+
+\subsection{Notation}
+\label{sec:notation}
+
+Several letters stand for more than one quantity, in keeping with the literature.
+Table~\ref{tab:notation} lists them together with symbols of similar form.
+
+\begin{table}[htbp]
+\caption{Symbols with more than one meaning and symbols of similar form.}
+\label{tab:notation}
+\centering
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{} >{\raggedright\arraybackslash}p{3.6cm} >{\raggedright\arraybackslash}p{12.2cm} @{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$m$ & degree of a VSWF, always a subscript ($-n \leq m \leq n$). In Sec.~\ref{sec:shared-basis} and in the tables of results, $m$ without a subscript is the relative refractive index $m_\mathrm{rel}$ \\
+$n$, $l$, $w$ & order of the source VSWF, order of the target VSWF, intermediate order of the translation \\
+$k$ & wavenumber in the medium, equal to 1 after the scaling of Sec.~\ref{sec:problem-setup}; degree of the target VSWF in the pair $(k, l)$; counter of basis vectors in Sec.~\ref{sec:shared-basis} \\
+$p$; $q$; $t$ & block of the lr\_tran basis (1: $L$, 2: $R$); incident polarisation; mode (1: TM, 2: TE) \\
+$i$, $j$ & spheres. $j$ also numbers the refractive indices $m_j$ of a sweep and the steps of Table~\ref{tab:gmres} \\
+$N_S$; $N_i$; $N_\mathrm{Mie}$; $N_\mathrm{c}$ & number of spheres; truncation order of sphere $i$; single-sphere order of Eq.~\eqref{eq:nstop}; contact order \\
+$N_0$; $N_\mathrm{node}$; $F_i$ & order about the common origin; order of the grid nodes; far order of sphere $i$ \\
+$d_{ij}$; $d_\mathrm{c}$ & centre distance of two spheres; cell spacing of the FFT grid \\
+$d^{(a)}$, $d^{(b)}$; $d^n_{m'm}$ & constants of the affine fit of Eq.~\eqref{eq:affine-fit}; Wigner d-matrix \\
+$\mathbf{H}_{ij}$; $\bar{\mathbf{H}}_K$ & translation matrix; Hessenberg matrix of the Arnoldi process \\
+$\beta$; $\beta_n$ & norm of the start vector in Tables~\ref{tab:gmres} and \ref{tab:shared-basis-algorithm}, and Euler angle in Sec.~\ref{sec:cluster-tmatrix}; scalar of the CBICG iteration \\
+$\tau_N$; $\tau_{m,n,t}$ & tail bound of the contact order; angular functions of the amplitudes \\
+$\varepsilon$; $\varepsilon_\mathrm{b}$; $\epsilon_\mathrm{t}$ & tolerance of the solver (bound on the squared relative residual); tolerance of the shared basis; requested accuracy of the truncation order \\
+$K$, $K_q$ & number of vectors of the shared basis, for the incident polarisation $q$ \\
+$\sigma$; $\mu^{(a)}$, $\mu^{(b)}$ & shift function $1/(m^2-1)$; slopes of the affine fit \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ============================================================
 %% ============================================================
 \section{Single-Sphere Scattering: Lorenz--Mie Theory}
 \label{sec:mie}
@@ -104,7 +159,7 @@ where:
 \begin{itemize}[nosep]
   \item $\psi_n(z) = z\,j_n(z)$ is the Riccati--Bessel function ($j_n$: spherical Bessel function of the first kind)
   \item $\xi_n(z) = z\,h_n^{(1)}(z) = \psi_n(z) + i\,\chi_n(z)$ is the Riccati--Hankel function
-  \item $\chi_n(z) = -z\,y_n(z)$ ($y_n$: spherical Bessel function of the second kind)
+  \item $\chi_n(z) = z\,y_n(z)$ ($y_n$: spherical Bessel function of the second kind)
   \item $D_n(z) = \frac{d}{dz}\ln[z\,j_n(z)] = \psi_n'(z)/\psi_n(z)$ is the logarithmic derivative
 \end{itemize}
 
@@ -115,30 +170,96 @@ The logarithmic derivative $D_n(y)$ with $y = m_\mathrm{rel}\,x$ is computed by 
 \end{equation}
 starting from a sufficiently large $n_\mathrm{start} \geq \max(N_\mathrm{max}, |y|) + 16$ where $D_{n_\mathrm{start}} \approx 0$.
 This recurrence is unconditionally stable for any complex $y$.
-The Riccati--Bessel functions $\psi_n(x)$ and $\chi_n(x)$ (for real argument $x$) are computed by upward recurrence:
+The Riccati--Bessel function $\chi_n(x)$ of the real argument $x$ is computed by the upward recurrence
 \begin{equation}
-  f_n(x) = \frac{2n - 1}{x}\,f_{n-1}(x) - f_{n-2}(x)
+  \chi_n(x) = \frac{2n - 1}{x}\,\chi_{n-1}(x) - \chi_{n-2}(x)
   \label{eq:bessel-recurrence}
 \end{equation}
-with starting values $\psi_0 = \sin x$, $\psi_1 = \sin x / x - \cos x$, $\chi_0 = -\cos x$, $\chi_1 = -\cos x / x - \sin x$.
+with the starting values $\chi_0 = -\cos x$ and $\chi_1 = -\cos x / x - \sin x$.
+This direction is stable for $\chi_n$, which grows with $n$.
+It is not stable for $\psi_n$ when $n$ exceeds $x$, because rounding errors then grow like $\chi_n$.
+The function $\psi_n(x)$ is therefore computed by Miller's downward recurrence
+\begin{equation}
+  \psi_{n-1}(x) = \frac{2n + 1}{x}\,\psi_n(x) - \psi_{n+1}(x),
+  \label{eq:miller-recurrence}
+\end{equation}
+started with $\psi_{n_\mathrm{s}+1} = 0$ and $\psi_{n_\mathrm{s}} = 1$ at $n_\mathrm{s} = \max(N, \lceil x \rceil) + 16$ and normalised afterwards with the exact $\psi_0 = \sin x$.
+The spherical Bessel function of the regular translation (Sec.~\ref{sec:translation}) is computed in the same way.
 
 The multipole expansion is truncated at order $N_i$ determined by the criterion of Wiscombe (1980) as implemented in the MSTM code:
 \begin{equation}
   N_i = \mathrm{round}\!\left(x_i + 4\,x_i^{1/3}\right) + 5,
   \label{eq:nstop}
 \end{equation}
-refined by a convergence check: starting from this upper bound, $N_i$ is reduced until the cumulative partial extinction efficiency $Q_\mathrm{ext}^{(N_i)}$ deviates from the total by more than $10^{-6}$.
+refined by a convergence check: $N_i$ is the smallest order at which the partial sum of the extinction efficiency differs from the sum up to this bound by less than $10^{-6}$ in relative terms.
 This criterion describes an isolated sphere.
 For spheres that touch, the order can be raised by the two-sphere criterion of Sec.~\ref{sec:contact-order}.
 
-In the lr\_tran basis, the single-sphere T-matrix for multipole order $n$ takes the $2 \times 2$ form coupling the $p = 1$ and $p = 2$ blocks (Mackowski 1996, derived from the \texttt{mieoa} routine in MSTM v4.0):
+In the lr\_tran basis, the single-sphere T-matrix for multipole order $n$ takes the $2 \times 2$ form coupling the $p = 1$ and $p = 2$ blocks (routine \texttt{mieoa} of MSTM v4.0):
 \begin{equation}
   \mathbf{T}_n = -\frac{1}{2}
   \begin{pmatrix} a_n + b_n & a_n - b_n \\ a_n - b_n & a_n + b_n \end{pmatrix}
   \label{eq:tmatrix-lr}
 \end{equation}
-This matrix is diagonal in the combined index $mn$ (it does not mix different $(m,n)$ pairs) but couples the two circular polarisation blocks.
-For an isotropic sphere, $a_n \neq b_n$ in general, so the off-diagonal coupling is physically meaningful and arises from the difference in electric and magnetic multipole scattering.
+The paragraphs below give its place in the T-matrix of the sphere, its origin and its inverse.
+
+\paragraph{Dimension and elements.}
+The coefficients of sphere $i$ carry the order $n = 1, \dots, N_i$, the degree $m = -n, \dots, n$ and the block index $p = 1, 2$.
+There are $h_i = N_i(N_i+2)$ pairs $(n, m)$ and therefore $2h_i$ coefficients.
+The T-matrix of sphere $i$ maps the coefficients of the exciting field to those of the scattered field (Eq.~\eqref{eq:tmatrix-relation}).
+It is the $2h_i \times 2h_i$ matrix with the elements
+\begin{equation}
+  \left(\mathbf{T}_i\right)_{(n m p),\,(n' m' p')} = \delta_{nn'}\,\delta_{mm'}\,\left(\mathbf{T}_n\right)_{pp'},
+  \label{eq:tmatrix-elements}
+\end{equation}
+where $\mathbf{T}_n$ is the matrix of Eq.~\eqref{eq:tmatrix-lr} with $a_n(x_i, m_\mathrm{rel})$ and $b_n(x_i, m_\mathrm{rel})$.
+The Kronecker symbols express the rotational symmetry of the sphere: it does not couple different pairs $(n, m)$, and the elements do not depend on $m$.
+After a reordering of the indices $\mathbf{T}_i$ is the direct sum of $h_i$ blocks of size $2 \times 2$, with $2n+1$ equal blocks for the order $n$.
+
+\paragraph{Origin of the block.}
+Lorenz--Mie theory is diagonal in the two modes of Sec.~\ref{sec:vswf}.
+Mode 1 (TM) scatters with $a_n$ and mode 2 (TE) with $b_n$.
+In the sign convention of the code the mode coefficients of the scattered field and of the exciting field are related by
+\begin{equation}
+  \begin{pmatrix} c_{mn,1}^\mathrm{sca} \\ c_{mn,2}^\mathrm{sca} \end{pmatrix}
+  = \begin{pmatrix} -a_n & 0 \\ 0 & -b_n \end{pmatrix}
+    \begin{pmatrix} c_{mn,1}^\mathrm{exc} \\ c_{mn,2}^\mathrm{exc} \end{pmatrix}.
+  \label{eq:tmatrix-ab}
+\end{equation}
+By Eq.~\eqref{eq:lr-coefficient-relation} the mode coefficients follow from the lr\_tran coefficients as
+\begin{equation}
+  \begin{pmatrix} c_{mn,1} \\ c_{mn,2} \end{pmatrix} = \mathbf{U} \begin{pmatrix} a_{mn,1} \\ a_{mn,2} \end{pmatrix}, \qquad
+  \mathbf{U} = \begin{pmatrix} 1 & 1 \\ 1 & -1 \end{pmatrix}.
+  \label{eq:lr-coefficients}
+\end{equation}
+Insertion into Eq.~\eqref{eq:tmatrix-ab} gives $\mathbf{T}_n = \mathbf{U}^{-1}\,\mathrm{diag}(-a_n, -b_n)\,\mathbf{U}$, which is Eq.~\eqref{eq:tmatrix-lr}.
+The routine \texttt{mieoa} of MSTM v4.0 computes the block in the lr\_tran basis directly.
+For a homogeneous sphere its formula reproduces Eq.~\eqref{eq:tmatrix-lr} with the coefficients $a_n$ and $b_n$ of BH83 (checked numerically for $n = 1$ with the formula of MSTM v3.0), which fixes the numbering of the modes.
+
+\paragraph{Eigenvalues and inverse.}
+Direct multiplication shows that
+\begin{equation}
+  \mathbf{T}_n \begin{pmatrix} 1 \\ 1 \end{pmatrix} = -a_n \begin{pmatrix} 1 \\ 1 \end{pmatrix}, \qquad
+  \mathbf{T}_n \begin{pmatrix} 1 \\ -1 \end{pmatrix} = -b_n \begin{pmatrix} 1 \\ -1 \end{pmatrix}.
+  \label{eq:tmatrix-eigen}
+\end{equation}
+The eigenvalues of $\mathbf{T}_n$ are $-a_n$ and $-b_n$.
+The eigenvectors do not depend on the refractive index, on the size parameter or on $n$.
+With the symmetric orthogonal matrix $\mathbf{P} = \mathbf{U}/\sqrt{2}$, for which $\mathbf{P}^{-1} = \mathbf{P}$,
+\begin{equation}
+  \mathbf{T}_n = \mathbf{P}\,\mathrm{diag}(-a_n, -b_n)\,\mathbf{P}.
+  \label{eq:tmatrix-diagonal-form}
+\end{equation}
+For $a_n \neq 0$ and $b_n \neq 0$ the inverse is therefore
+\begin{equation}
+  \mathbf{T}_n^{-1} = \mathbf{P}\,\mathrm{diag}\!\left(-\frac{1}{a_n}, -\frac{1}{b_n}\right)\mathbf{P}
+  = -\frac{1}{2}
+  \begin{pmatrix} \dfrac{1}{a_n} + \dfrac{1}{b_n} & \dfrac{1}{a_n} - \dfrac{1}{b_n} \\[2ex]
+                  \dfrac{1}{a_n} - \dfrac{1}{b_n} & \dfrac{1}{a_n} + \dfrac{1}{b_n} \end{pmatrix}.
+  \label{eq:tmatrix-inverse}
+\end{equation}
+It has the form of Eq.~\eqref{eq:tmatrix-lr} with $1/a_n$ and $1/b_n$ in place of $a_n$ and $b_n$.
+Its eigenvalues are $-1/a_n$ and $-1/b_n$, and its elements are their half sum and half difference.
 
 %% ============================================================
 \section{Multi-Sphere Interaction Equation}
@@ -146,12 +267,35 @@ For an isotropic sphere, $a_n \neq b_n$ in general, so the off-diagonal coupling
 
 \subsection{Coupled field equations}
 
-The field that excites sphere $i$ consists of the external incident wave plus the scattered fields from all other spheres, translated to the coordinate origin of sphere $i$ using the VSWF translation addition theorem (Mackowski 1991, 1996; Xu 1996):
+The field that excites sphere $i$ consists of the external incident wave plus the scattered fields from all other spheres, translated to the coordinate origin of sphere $i$ using the VSWF translation addition theorem (Mackowski 1991; Mackowski \& Mishchenko 1996; Xu 1996):
 \begin{equation}
   \bm{p}_\mathrm{exc}^{(i)} = \bm{p}_\mathrm{inc}^{(i)} + \sum_{j \neq i} \mathbf{H}_{ij}\,\bm{a}^{(j)}
   \label{eq:exciting-field}
 \end{equation}
 where $\mathbf{H}_{ij}$ is the translation matrix that re-expands outgoing VSWFs centred at $\bm{r}_j$ into regular VSWFs centred at $\bm{r}_i$ (Hankel-to-Bessel type), and $\bm{a}^{(j)}$ is the vector of scattered-field expansion coefficients of sphere $j$.
+
+The matrix $\mathbf{H}_{ij}$ is defined by the translation addition theorem.
+An outgoing VSWF centred at $\bm{r}_j$ is a sum of regular VSWFs centred at $\bm{r}_i$:
+\begin{equation}
+  \tilde{\bm{N}}_{mn,p}^{(3)}(\bm{r} - \bm{r}_j)
+  = \sum_{l=1}^{\infty} \sum_{k=-l}^{l} H^{(p)}_{kl,mn}(\bm{r}_i - \bm{r}_j)\;
+    \tilde{\bm{N}}_{kl,p}^{(1)}(\bm{r} - \bm{r}_i),
+  \qquad |\bm{r} - \bm{r}_i| < |\bm{r}_i - \bm{r}_j|,
+  \label{eq:addition-theorem}
+\end{equation}
+where $p = 1, 2$ stands for the functions $L$, $R$ of Eq.~\eqref{eq:lr-basis}.
+The theorem does not mix the two values of $p$ (Sec.~\ref{sec:lr-basis}).
+In components Eq.~\eqref{eq:exciting-field} therefore reads
+\begin{equation}
+  p_{\mathrm{exc},\,kl,p}^{(i)} = p_{\mathrm{inc},\,kl,p}^{(i)}
+  + \sum_{j \neq i} \sum_{n=1}^{N_j} \sum_{m=-n}^{n} H^{(p)}_{kl,mn}(\bm{r}_i - \bm{r}_j)\; a_{mn,p}^{(j)}.
+  \label{eq:exciting-field-components}
+\end{equation}
+The sum over $l$ in Eq.~\eqref{eq:addition-theorem} is truncated at the order $N_i$ of the target sphere.
+For each $p$ the block $\mathbf{H}_{ij}$ has $N_i(N_i+2)$ rows and $N_j(N_j+2)$ columns.
+It depends on the vector $\bm{r}_i - \bm{r}_j$ in units of $1/k$ only, not on the refractive index of the spheres.
+Section~\ref{sec:translation} gives the formula by which the elements are computed.
+Section~\ref{sec:fft-translation} gives the FFT scheme that replaces the sum over $j$ for distant pairs.
 
 The T-matrix relates the exciting field to the scattered field:
 \begin{equation}
@@ -159,13 +303,34 @@ The T-matrix relates the exciting field to the scattered field:
   \label{eq:tmatrix-relation}
 \end{equation}
 
-Substituting and rearranging into a single global linear system for $\bm{x} = (\bm{a}^{(1)}, \dots, \bm{a}^{(N_S)})^\top$ gives (Mackowski 1994, Eq.~6):
+Substituting and rearranging into a single global linear system for $\bm{x} = (\bm{a}^{(1)}, \dots, \bm{a}^{(N_S)})^\top$ gives (Mackowski 1994, Eq.~13):
 \begin{equation}
   (\mathbf{I} - \mathbf{T}\,\mathbf{A})\,\bm{x} = \mathbf{T}\,\bm{p}_\mathrm{inc}
   \label{eq:global-system}
 \end{equation}
 where $\mathbf{T} = \mathrm{diag}(\mathbf{T}_1, \dots, \mathbf{T}_{N_S})$ is the block-diagonal T-matrix and $\mathbf{A}$ is the off-diagonal translation operator with blocks $\mathbf{H}_{ij}$ ($i \neq j$) and zeros on the diagonal.
 The dimension of this system is $\sum_i 2\,N_i(N_i+2)$ --- twice the multipole block size because each sphere carries both $p = 1$ and $p = 2$ polarisation blocks.
+
+\subsection{Incident plane wave coefficients}
+\label{sec:incident}
+
+The incident wave propagates along $+z$.
+Only the degrees $m = \pm 1$ of its expansion are then non-zero.
+In the lr\_tran basis, the incident field coefficients for sphere $i$ are:
+\begin{equation}
+  p_{mn,p=1,q=1}^{(i)} = i^{\,n+1}\sqrt{\frac{2n+1}{2}}\;\delta_{m,+1}\;e^{iz_i}, \qquad
+  p_{mn,p=2,q=1}^{(i)} = -i^{\,n+1}\sqrt{\frac{2n+1}{2}}\;\delta_{m,-1}\;e^{iz_i}
+  \label{eq:pinc-q1}
+\end{equation}
+for the first incident polarisation ($q = 1$), and
+\begin{equation}
+  p_{mn,p=1,q=2}^{(i)} = -i^{\,n+2}\sqrt{\frac{2n+1}{2}}\;\delta_{m,+1}\;e^{iz_i}, \qquad
+  p_{mn,p=2,q=2}^{(i)} = -i^{\,n+2}\sqrt{\frac{2n+1}{2}}\;\delta_{m,-1}\;e^{iz_i}
+  \label{eq:pinc-q2}
+\end{equation}
+for $q = 2$.
+The phase factor $e^{iz_i}$ accounts for the spatial position of sphere $i$ along the propagation direction.
+The interaction equation is solved for the two incident polarisations $q = 1, 2$.
 
 \subsection{Truncation order for touching spheres}
 \label{sec:contact-order}
@@ -193,22 +358,22 @@ The relative increment at order $N$ is
                   {\left[\,\sum_{k=1}^{2} \left|S_k^{(N)}\right|^2\right]^{1/2}}.
   \label{eq:contact-increment}
 \end{equation}
-The contribution of the orders above $N$ is bounded under the assumption that the increments decay at least algebraically, $\delta_N \propto N^{-p}$.
+The contribution of the orders above $N$ is bounded under the assumption that the increments decay at least algebraically, $\delta_N \propto N^{-\zeta}$.
 The exponent is taken from the last three increments as the smaller of the two estimates
 \begin{equation}
-  p = \min\!\left[\frac{\ln(\delta_{N-1}/\delta_N)}{\ln\!\left(N/(N-1)\right)},\;
+  \zeta = \min\!\left[\frac{\ln(\delta_{N-1}/\delta_N)}{\ln\!\left(N/(N-1)\right)},\;
                  \frac{\ln(\delta_{N-2}/\delta_{N-1})}{\ln\!\left((N-1)/(N-2)\right)}\right],
   \label{eq:contact-exponent}
 \end{equation}
 and the tail bound is
 \begin{equation}
-  \tau_N = \frac{\delta_N\,N}{p - 1}\;
+  \tau_N = \frac{\delta_N\,N}{\zeta - 1}\;
            \frac{\left[\,\sum_k |S_k^{(N)}|^2\right]^{1/2}}{\min_k |S_k^{(N)}|}
-  \qquad (p > 1,\; \delta_N < \delta_{N-1} < \delta_{N-2}).
+  \qquad (\zeta > 1,\; \delta_N < \delta_{N-1} < \delta_{N-2}).
   \label{eq:contact-tail}
 \end{equation}
-The bound is taken as infinite if the increments do not yet decrease monotonically or if $p \leq 1$.
-The scan stops at the order $N_\mathrm{top}$ at which $\tau_N \leq f\,\epsilon$, where $\epsilon$ is the requested relative accuracy and $f = 0.25$ by default.
+The bound is taken as infinite if the increments do not yet decrease monotonically or if $\zeta \leq 1$.
+The scan stops at the order $N_\mathrm{top}$ at which $\tau_N \leq f\,\epsilon_\mathrm{t}$, where $\epsilon_\mathrm{t}$ is the requested relative accuracy and $f = 0.25$ by default.
 It also stops at a cap of $N = 40$, in which case the result is a lower bound and the code issues a warning.
 
 The estimated truncation error at order $N$ is the difference to the highest computed order plus the tail bound,
@@ -217,15 +382,16 @@ The estimated truncation error at order $N$ is the difference to the highest com
   \label{eq:contact-error}
 \end{equation}
 The difference is taken between complex numbers, so $e_N$ covers both amplitude and phase.
-The contact order $N_\mathrm{c}$ is the smallest order from which $e_N$ stays below $\epsilon$.
+The contact order $N_\mathrm{c}$ is the smallest order from which $e_N$ stays below $\epsilon_\mathrm{t}$.
 It is never smaller than $N_\mathrm{Mie}$.
 
 In an aggregate calculation every sphere then uses the largest of $N_\mathrm{c}$, its own order from Eq.~\eqref{eq:nstop} and a user-specified order.
 In a parameter sweep $N_\mathrm{c}$ is determined for every refractive index.
 On the GPU path all refractive indices of a batch share the largest order of the batch.
-Suggested values are $\epsilon = 10^{-2}$ for routine use and $\epsilon = 10^{-3}$ for precise calculations.
+Suggested values are $\epsilon_\mathrm{t} = 10^{-2}$ for routine use and $\epsilon_\mathrm{t} = 10^{-3}$ for precise calculations.
 
-Table~\ref{tab:contact-orders} lists the contact orders found for several ranges of the refractive index with $\epsilon = 10^{-2}$.
+\paragraph{Measured contact orders.}
+Table~\ref{tab:contact-orders} lists the contact orders found for several ranges of the refractive index with $\epsilon_\mathrm{t} = 10^{-2}$.
 The orders are the smallest and the largest value over the range and over the size parameters that were examined, which lie between 0.1 and 2.5.
 For dielectric and absorbing spheres in point contact the scan converges below the order 30 everywhere in these ranges.
 For metallic refractive indices it does not.
@@ -235,7 +401,7 @@ A truncation order below 30 therefore gives no meaningful result for metal spher
 A finite gap restores the convergence.
 
 \begin{table}[htbp]
-\caption{Contact order $N_\mathrm{c}$ for $\epsilon = 10^{-2}$, smallest and largest value over the range of the refractive index. $g$ is the surface separation divided by the sum of the radii.}
+\caption{Contact order $N_\mathrm{c}$ for $\epsilon_\mathrm{t} = 10^{-2}$, smallest and largest value over the range of the refractive index. $g$ is the surface separation divided by the sum of the radii.}
 \label{tab:contact-orders}
 \centering
 \renewcommand{\arraystretch}{1.2}
@@ -256,39 +422,95 @@ $\mathrm{Re}\,m$ & $\mathrm{Im}\,m$ & $g$ & $N_\mathrm{c}$ \\
 \end{tabular}
 \end{table}
 
-\subsection{Translation matrix via rotation--axial translation--rotation}
+\subsection{Computation of the translation matrix}
+\label{sec:translation}
 
-The translation matrix $\mathbf{H}_{ij}$ is computed via the factorisation into rotation, axial translation, and inverse rotation (Mackowski 1996, \S 3; Xu 1996, \S 4), which avoids the direct evaluation of Gaunt integrals and is more efficient:
+This section gives the elements $H^{(p)}_{kl,mn}(\bm{r}_i - \bm{r}_j)$ of Eq.~\eqref{eq:addition-theorem}.
+The literature has two equivalent forms of them, and the name ``rotation--translation'' belongs to one of the two.
+The package uses the other one.
 
+\paragraph{Two equivalent forms.}
+Let $(d_{ij}, \theta_{ij}, \phi_{ij})$ be the spherical coordinates of $k(\bm{r}_i - \bm{r}_j)$, the vector from the source sphere $j$ to the target sphere $i$.
 \begin{enumerate}[nosep]
-  \item \textbf{Rotation.}
-  Compute the spherical coordinates $(d_{ij}, \theta_{ij}, \phi_{ij})$ of the translation vector $\bm{r}_i - \bm{r}_j$.
-  The azimuthal phase factors $e^{im\phi_{ij}}$ and the normalised associated Legendre functions $P_n^m(\cos\theta_{ij})$ provide the rotation from the laboratory frame to a frame where the translation vector is along $z$.
-
-  \item \textbf{Axial translation coefficients.}
-  In the rotated frame where the two origins are separated along $z$ by distance $d_{ij}$, the translation coefficients factorise.
-  The key quantity involves a sum over intermediate order $w$:
+  \item \textbf{One-step form.}
+  Each element is a single sum of products of a radial function of $d_{ij}$, an angular function of $(\theta_{ij}, \phi_{ij})$ and a constant (Xu 1996; routine \texttt{gentranmatrix} of MSTM v4.0).
+  Equations~\eqref{eq:translation-sum} and \eqref{eq:lr-translation} below are this form.
+  \item \textbf{Factorised form} (rotation--axial translation--rotation; Mackowski \& Mishchenko 1996).
+  The coefficients are first rotated into a frame whose $z$ axis points from sphere $j$ to sphere $i$.
+  They are then translated along this axis by $d_{ij}$ and rotated back:
   \begin{equation}
-    C_{mn,kl} = \sum_{w=w_\mathrm{min}}^{n+l} c_w(m,n,k,l) \; h_w^{(1)}(d_{ij}) \; P_w^{m-k}(\cos\theta_{ij})
-    \label{eq:axial-translation}
+    \mathbf{H}_{ij} = \mathbf{R}^{-1}(\phi_{ij}, \theta_{ij})\;\mathbf{H}^\mathrm{ax}(d_{ij})\;\mathbf{R}(\phi_{ij}, \theta_{ij}).
+    \label{eq:rotation-translation}
   \end{equation}
-  where $w_\mathrm{min} = \max(|n-l|, |m-k|)$ and $c_w(m,n,k,l)$ are products of vector coupling (Gaunt) coefficients.
-  These coupling coefficients are related to Clebsch--Gordan coefficients and are evaluated using a combined downward--upward recurrence algorithm (Xu 1996, \S 3; Mackowski 1996, Appendix) that avoids explicit factorial computation and maintains numerical stability even at high multipole orders.
-
-  \item \textbf{Polarisation coupling in the lr\_tran basis.}
-  In this basis the translation matrix has a particularly simple structure: the even-$w$ and odd-$w$ contributions (relative to $n + l$) combine to give the two polarisation blocks independently.
-  Specifically, denoting the even- and odd-$w$ partial sums as $A$ and $B$:
-  \begin{equation}
-    H_{kl,mn}^{(p=1)} = e^{i(m-k)\phi_{ij}} \left(A + iB\right), \qquad
-    H_{kl,mn}^{(p=2)} = e^{i(m-k)\phi_{ij}} \left(A - iB\right).
-    \label{eq:lr-translation}
-  \end{equation}
-  This decoupling is the fundamental advantage of the lr\_tran basis (Mackowski 1996, Eq.~18): the two circular polarisation modes interact with each other only through the T-matrix, not through translation.
+  The rotation $\mathbf{R}$ consists of the phases $e^{im\phi_{ij}}$ and of the Wigner d-matrix of $\theta_{ij}$.
+  In the notation of Sec.~\ref{sec:wigner-rotation} it is $\mathbf{R} = \mathbf{D}(0, -\theta_{ij}, -\phi_{ij})$, and $\mathbf{R}^{-1} = \mathbf{R}^\dagger$.
+  It mixes the degrees $m$ within one order $n$.
+  The axial translation $\mathbf{H}^\mathrm{ax}$ couples the orders $n$ and $l$ and leaves the degree unchanged.
+  MSTM v4.0 has this form as well (routines \texttt{ephicoef}, \texttt{rotcoef} and \texttt{axialtrancoefrecurrence}).
 \end{enumerate}
+The two forms give the same matrix.
+For the matrices of the package Eq.~\eqref{eq:rotation-translation} holds to rounding error (relative difference $10^{-15}$ for the order 4), with $\mathbf{H}^\mathrm{ax}$ taken as the one-step matrix of a translation along $z$.
+Carrying out the product of Eq.~\eqref{eq:rotation-translation} analytically leads to the one-step form: the two rotations combine into one spherical harmonic of the direction $(\theta_{ij}, \phi_{ij})$.
+In the other direction, the one-step form for a translation along $z$ ($\theta_{ij} = 0$) is the axial matrix $\mathbf{H}^\mathrm{ax}$, because the angular function of Eq.~\eqref{eq:translation-sum} then vanishes unless $m = k$.
+The factorised form needs of the order of $N^3$ operations for a product with a vector of order $N$, and the stored one-step matrix needs of the order of $N^4$.
+The package implements the one-step form only (\texttt{compute\_translation\_matrix} and the matrix-free product \texttt{apply\_translation\_mvp!}).
+It has no rotation step in the translation.
 
-The coupling coefficients are precomputed once and cached as a 3D array \texttt{tran\_coef[mn, kl, w]} (Fortran routine \texttt{gentrancoefconstants}), while the distance-dependent Hankel functions and Legendre functions are evaluated per sphere pair.
+\paragraph{One-step form as implemented.}
+For the source index $(m, n)$ and the target index $(k, l)$ the code forms two partial sums over an intermediate order $w$:
+\begin{equation}
+  A = \sum_{\substack{w = w_\mathrm{min} \\ n+l-w\ \mathrm{even}}}^{n+l} c_w\; h_w^{(1)}(d_{ij})\; \bar{P}_w^{\,m-k}(\cos\theta_{ij}), \qquad
+  B = \sum_{\substack{w = w_\mathrm{min} \\ n+l-w\ \mathrm{odd}}}^{n+l} c_w\; h_w^{(1)}(d_{ij})\; \bar{P}_w^{\,m-k}(\cos\theta_{ij}),
+  \label{eq:translation-sum}
+\end{equation}
+with $w_\mathrm{min} = \max(|n-l|, |m-k|)$.
+The three factors have separate roles.
+\begin{itemize}[nosep]
+  \item The spherical Hankel function $h_w^{(1)}(d_{ij})$ carries the distance.
+  \item The normalised associated Legendre function $\bar{P}_w^{\,m-k}(\cos\theta_{ij})$ carries the polar angle of the direction. Together with the phase of Eq.~\eqref{eq:lr-translation} it is the spherical harmonic that replaces the two rotations of the factorised form.
+  \item The real coefficient $c_w = c_w(m, n, k, l)$ does not depend on the pair of spheres. It is the product of two vector-coupling (Clebsch--Gordan) coefficients and of constants. The coupling coefficients come from a combined downward--upward recurrence without explicit factorials (Xu 1996; Mackowski \& Mishchenko 1996).
+\end{itemize}
+The two polarisation blocks follow from the partial sums:
+\begin{equation}
+  H_{kl,mn}^{(p=1)} = e^{i(m-k)\phi_{ij}} \left(A + iB\right), \qquad
+  H_{kl,mn}^{(p=2)} = e^{i(m-k)\phi_{ij}} \left(A - iB\right).
+  \label{eq:lr-translation}
+\end{equation}
+The translation thus acts on each block separately (Sec.~\ref{sec:lr-basis}).
+
+The coefficients $c_w$ are computed once and cached as the array \texttt{tran\_coef[w, mn, kl]} (Fortran routine \texttt{gentrancoefconstants}).
+The Hankel functions, the Legendre functions and the phases are evaluated for every pair of spheres.
+
+\paragraph{Regular translation.}
+With the spherical Bessel function $j_w$ in place of $h_w^{(1)}$, Eqs.~\eqref{eq:translation-sum} and \eqref{eq:lr-translation} give the matrix $\mathbf{J}$ that re-expands regular VSWFs about a new origin, and also outgoing VSWFs at points farther from the new origin than the old one.
+The package uses it between the spheres and the common origin (keyword \texttt{use\_regular} of \texttt{compute\_translation\_matrix}).
+
+\paragraph{Translations and rotations in this note.}
+Table~\ref{tab:translation-rotation} lists the places where a translation or a rotation of expansion coefficients occurs.
+All translations use the one-step form of this section.
+The only rotation is that of the whole particle in Sec.~\ref{sec:wigner-rotation}.
+It acts on the coefficients about one origin and is not a part of any translation.
+
+\begin{table}[htbp]
+\caption{Translations and rotations of expansion coefficients in the package.}
+\label{tab:translation-rotation}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} >{\raggedright\arraybackslash}p{4.3cm} >{\raggedright\arraybackslash}p{2.4cm} >{\raggedright\arraybackslash}p{4.4cm} >{\raggedright\arraybackslash}p{4.6cm} @{}}
+\toprule
+Operation & Kernel & Purpose & Section and function \\
+\midrule
+Translation $\mathbf{H}_{ij}$, sphere $j$ to sphere $i$ & one-step form with $h_w^{(1)}$ & interaction of the spheres in $\mathbf{A}$ & Secs.~\ref{sec:multi-sphere}, \ref{sec:translation}; \texttt{apply\_translation\_mvp!} \\
+The same for distant pairs & FFT on a grid & faster product $\mathbf{A}\bm{v}$ & Sec.~\ref{sec:fft-translation}; \texttt{apply\_A\_fft!} \\
+Translation $\mathbf{J}_{0i}$, sphere $i$ to the common origin & one-step form with $j_w$ & amplitudes and $Q_\mathrm{sca}$ from the solution & Sec.~\ref{sec:output}; \texttt{\_merge\_to\_origin!} \\
+Translation $\mathbf{J}_{i0}$, common origin to sphere $i$ & one-step form with $j_w$ & right-hand sides of the cluster T-matrix & Sec.~\ref{sec:cluster-tmatrix}; \texttt{build\_cluster\_tmatrix} \\
+Rotation $\mathbf{D}(\Omega)$ about the common origin & Wigner D-matrix & orientation of the particle & Sec.~\ref{sec:wigner-rotation}; \texttt{wigner\_D} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{FFT-accelerated translation}
+\label{sec:fft-translation}
 
 For large numbers of spheres ($N_S \gtrsim 100$), the direct pairwise evaluation of $\mathbf{A}\,\bm{v}$ scales as $O(N_S^2)$ per iteration and dominates the computation time.
 Mackowski \& Kolokolova (2022) introduced a discrete Fourier convolution (DFC) scheme into MSTM v4.0 that reduces this to approximately $O(N_S \ln N_S)$ scaling.
@@ -296,16 +518,16 @@ The algorithm proceeds as follows:
 
 \begin{enumerate}[nosep]
   \item \textbf{Grid construction.}
-  A uniform cubic grid with cell spacing $d$ is mapped onto the target volume.
-  The cell spacing is chosen from the mean monomer radius and a target volume fraction $f_v$ as $d = \bar{a} \left(4\pi / 3 f_v\right)^{1/3}$, and each grid dimension is rounded up to the nearest integer of the form $2^a \times 3^b \times 5^c$ for efficient FFT computation (Temperton's generalised prime-factor FFT).
+  A uniform cubic grid with cell spacing $d_\mathrm{c}$ is mapped onto the target volume.
+  The cell spacing is chosen from the mean monomer radius and a target volume fraction $f_v$ as $d_\mathrm{c} = \bar{a} \left(4\pi / 3 f_v\right)^{1/3}$, and each grid dimension is rounded up to the nearest integer of the form $2^a \times 3^b \times 5^c$, for which the FFT is efficient.
 
   \item \textbf{Sphere--node association.}
   Each sphere is assigned to the grid cell containing its centre.
   A \emph{neighbour hole} region is defined around each cell: for all cell pairs within this exclusion region (typically $|i - j| \leq \sqrt{2}$, i.e., self + face-adjacent + edge-adjacent cells), sphere--sphere interactions are computed by direct Hankel-type translation, preserving accuracy at short inter-sphere distances.
 
   \item \textbf{Sphere $\to$ Node.}
-  For each sphere, the scattered-field expansion coefficients are translated to its associated grid node using a regular (Bessel $j_n$) translation matrix $\mathbf{J}$.
-  This is valid because the sphere centre is within the grid cell (distance less than $d/2$), well within the convergence region of the regular addition theorem.
+  For each sphere, the scattered-field expansion coefficients are translated to its associated grid node using the regular translation matrix $\mathbf{J}$ of Sec.~\ref{sec:translation}.
+  This is valid because the sphere centre is within the grid cell (distance less than $d_\mathrm{c}/2$), well within the convergence region of the regular addition theorem.
 
   \item \textbf{Node-to-node convolution.}
   The grid-based translation operator is a discrete convolution: the translation matrix from node $\bm{i}$ to node $\bm{j}$ depends only on the displacement $\bm{j} - \bm{i}$.
@@ -335,7 +557,7 @@ The memory and the time of the grid part grow steeply with $N_\mathrm{node}$.
 A high sphere order, such as the contact order of Sec.~\ref{sec:contact-order}, is needed only for the coupling between spheres that are close to each other.
 The code can therefore limit the order that the grid carries (option \texttt{fft\_far\_order}).
 Let $F_i \leq N_i$ be the far order of sphere $i$.
-The node order is $N_\mathrm{node} = \max\!\left(\lceil d \rceil, \max_i F_i\right)$.
+The node order is $N_\mathrm{node} = \max\!\left(\lceil d_\mathrm{c} \rceil, \max_i F_i\right)$.
 Spheres $i$ and $j$ are called a near pair if
 \begin{equation}
   |\bm{r}_i - \bm{r}_j| \leq \kappa\,(a_i + a_j),
@@ -359,14 +581,18 @@ With $F_i = N_i$ the operator is the original one and $\kappa$ has no effect.
 In a parameter sweep the far order is $F = \min\!\left[N_\mathrm{max}, \max(F_\mathrm{user}, N_\mathrm{Mie,max})\right]$, where $N_\mathrm{max}$ is the largest sphere order and $N_\mathrm{Mie,max}$ is the largest single-sphere order of Eq.~\eqref{eq:nstop} over the refractive index grid.
 The memory and the time of the grid part then do not depend on the orders that the contact criterion adds.
 The result has the accuracy of the FFT translation at order $F$.
+\paragraph{Measured effect of the far order.}
 For an aggregate of 350 monomers at sphere order 8, $F = 4$ reduced the memory of the translation data from \SI{2.7}{\giga\byte} to \SI{0.6}{\giga\byte}.
 The forward amplitudes then differed from the direct solution by \SI{0.16}{\percent}, against \SI{0.09}{\percent} with the grid carrying all orders.
 
 %% ============================================================
-\section{Iterative Solution: Complex BiConjugate Gradient}
+\section{Iterative Solution of the Interaction Equation}
 \label{sec:cbicg}
 
-The linear system $\mathbf{L}\,\bm{x} = \bm{b}$ where $\mathbf{L} = \mathbf{I} - \mathbf{T}\,\mathbf{A}$ and $\bm{b} = \mathbf{T}\,\bm{p}_\mathrm{inc}$ is solved by the Complex BiConjugate Gradient (CBICG) method (Mackowski \& Mishchenko 2011, \S 2.3).
+The linear system $\mathbf{L}\,\bm{x} = \bm{b}$ where $\mathbf{L} = \mathbf{I} - \mathbf{T}\,\mathbf{A}$ and $\bm{b} = \mathbf{T}\,\bm{p}_\mathrm{inc}$ is solved by the Complex BiConjugate Gradient (CBICG) method by default (Mackowski \& Mishchenko 2011).
+GMRES is available as an alternative.
+A sweep over the refractive index can start each solve from the previous solution, and a GPU can solve several refractive indices at once.
+Section~\ref{sec:shared-basis} describes a different way to sweep the refractive index.
 
 \subsection{Operator definitions}
 
@@ -407,15 +633,19 @@ The CBICG (Complex BiConjugate Gradient) algorithm is summarised in Table~\ref{t
 \quad 4. \; $\bm{x}_{n+1} = \bm{x}_n + \alpha_n\,\bm{p}_n$ \\
 \quad 5. \; $\bm{r}_{n+1} = \bm{r}_n - \alpha_n\,\bm{u}$, \quad $\bm{q}_{n+1} = \bm{q}_n - \overline{\alpha}_n\,\bm{v}$ \\
 \quad 6. \; $s_{n+1} = \bm{q}_{n+1}^\mathsf{H} \bm{r}_{n+1}$ \\
-\quad 7. \; If $\mathrm{Re}(\bm{r}_{n+1}^\top \bm{r}_{n+1}) / \|\bm{b}\|^2 < \varepsilon$: \textbf{stop}, return $\bm{x}_{n+1}$. \\
+\quad 7. \; If $\|\bm{r}_{n+1}\|^2 / \|\bm{b}\|^2 < \varepsilon$: \textbf{stop}, return $\bm{x}_{n+1}$. \\
 \quad 8. \; $\beta_n = s_{n+1} / s_n$ \\
 \quad 9. \; $\bm{p}_{n+1} = \bm{r}_{n+1} + \beta_n\,\bm{p}_n$, \quad $\bm{w}_{n+1} = \bm{q}_{n+1} + \overline{\beta}_n\,\bm{w}_n$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Note: the convergence criterion (step~7) uses the \emph{bilinear} (not sesquilinear) inner product $\bm{r}^\top \bm{r} = \sum_i r_i^2$, following the Fortran MSTM implementation.  The shadow residual $\bm{q} = \overline{\bm{r}}$ ensures that $\bm{q}^\mathsf{H}\bm{r} = \sum_i r_i^2$.
+The scalar $s_n$ is formed with the shadow residual.
+With $\bm{q}_0 = \overline{\bm{r}_0}$ it starts as the bilinear product $s_0 = \bm{r}_0^\top \bm{r}_0$.
+The convergence test of step~7 uses the Euclidean norm, $\|\bm{r}\|^2 = \bm{r}^\mathsf{H}\bm{r}$.
 
+\paragraph{Error left by the tolerance.}
+\label{sec:cbicg-tolerance}
 The tolerance $\varepsilon$ bounds the squared residual, so the default $\varepsilon = 10^{-6}$ stops the iteration at a relative residual norm of $10^{-3}$.
 The error that this leaves in the outputs was measured against solutions with $\varepsilon = 10^{-14}$ at the same truncation order.
 For aggregates of 350 to 2800 monomers with size parameters of 0.09 to 0.25 the forward amplitudes $S_1$ and $S_2$ differ by \numrange{2e-4}{5e-4} in relative terms.
@@ -439,16 +669,16 @@ The algorithm is summarised in Table~\ref{tab:gmres}.
 \renewcommand{\arraystretch}{1.3}
 \begin{tabular}{@{}p{0.95\textwidth}@{}}
 \toprule
-\textbf{Input:} $\mathbf{L}$, $\bm{b}$, tolerance $\varepsilon$, restart parameter $m$, max iterations $n_\mathrm{max}$. \\
+\textbf{Input:} $\mathbf{L}$, $\bm{b}$, tolerance $\varepsilon$, restart length $j_\mathrm{r}$, max iterations $n_\mathrm{max}$. \\
 \textbf{Initialise:} $\bm{x}_0 = \bm{b}$, \; $\bm{r}_0 = \bm{b} - \mathbf{L}\,\bm{x}_0$, \; $\beta = \|\bm{r}_0\|_2$, \; $\bm{v}_1 = \bm{r}_0 / \beta$. \\[4pt]
-\textbf{For} $j = 1, 2, \ldots, \min(m, n_\mathrm{max})$: \\[2pt]
+\textbf{For} $j = 1, 2, \ldots, \min(j_\mathrm{r}, n_\mathrm{max})$: \\[2pt]
 \quad 1. \; $\bm{w} = \mathbf{L}\,\bm{v}_j$ \hfill (1 forward operator application) \\
 \quad 2. \; \textbf{For} $i = 1, \ldots, j$: \; $h_{ij} = \bm{v}_i^\mathsf{H}\,\bm{w}$, \; $\bm{w} \leftarrow \bm{w} - h_{ij}\,\bm{v}_i$ \hfill (modified Gram--Schmidt) \\
 \quad 3. \; $h_{j+1,j} = \|\bm{w}\|_2$, \; $\bm{v}_{j+1} = \bm{w} / h_{j+1,j}$ \\
 \quad 4. \; Solve $\bm{y}_j = \arg\min_{\bm{y}} \|\beta\,\bm{e}_1 - \bar{\mathbf{H}}_j\,\bm{y}\|_2$ via Givens rotations \\
 \quad 5. \; If $\|\beta\,\bm{e}_1 - \bar{\mathbf{H}}_j\,\bm{y}_j\|_2 / \|\bm{b}\|_2 < \varepsilon$: \textbf{stop}. \\[4pt]
 \textbf{Solution update:} $\bm{x} = \bm{x}_0 + \mathbf{V}_j\,\bm{y}_j$, where $\mathbf{V}_j = [\bm{v}_1, \ldots, \bm{v}_j]$. \\
-If $j = m$ and not converged: restart with $\bm{x}_0 \leftarrow \bm{x}$. \\
+If $j = j_\mathrm{r}$ and not converged: restart with $\bm{x}_0 \leftarrow \bm{x}$. \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -458,7 +688,7 @@ Key properties of GMRES compared to CBICG:
   \item 1 operator application per iteration (no adjoint), versus 2 for CBICG.
   \item Monotonically decreasing residual: $\|\bm{r}_k\|_2 \leq \|\bm{r}_{k-1}\|_2$ by construction.
   \item Memory: $O(kn)$ for $k$ Krylov basis vectors of length $n$ (${\sim}\SI{14}{\mega\byte}$ for $k = 30$, $n = 48000$).
-  \item The implementation uses $m = 30$ (Krylov.jl \texttt{memory} parameter).
+  \item The implementation uses $j_\mathrm{r} = 30$ (Krylov.jl \texttt{memory} parameter).
 \end{itemize}
 
 \textbf{Performance comparison.}
@@ -473,7 +703,7 @@ When the refractive index changes from $m_j$ to $m_{j+1}$, only the Mie coeffici
 
 The continuation is applied automatically in the parameter sweep (\texttt{run\_parameter\_sweep}): within each (aggregate, medium condition) group, the solver coefficients $\bm{x}$ from the previous refractive index grid point are passed as the initial guess to the next.  If the equation system size changes (e.g., due to a change in the converged Mie truncation order), the continuation is skipped and the default initial guess is used.
 
-Benchmarks (1000 spheres, FFT mode, $\Delta m \approx 0.05$) show a reduction from 15 to 9--11 iterations per grid point, corresponding to a wall-time speedup of approximately $1.2\times$.  For smaller aggregates ($N_p \sim 100$) where the cold-start solver already converges in 3--4 iterations, the improvement is marginal.
+Benchmarks (1000 spheres, FFT mode, $\Delta m \approx 0.05$) show a reduction from 15 to 9--11 iterations per grid point, corresponding to a wall-time speedup of approximately $1.2\times$.  For smaller aggregates ($N_S \sim 100$) where the cold-start solver already converges in 3--4 iterations, the improvement is marginal.
 
 \paragraph{Snake-path grid traversal.}
 The effectiveness of the continuation method depends critically on the step size $|m_{j+1} - m_j|$ between consecutive grid points.
@@ -488,69 +718,73 @@ The \emph{snake-path} (boustrophedon) traversal eliminates this problem by rever
   \end{cases}
 \end{equation*}
 This ensures that consecutive grid points always differ by either $\Delta m_\mathrm{real}$ or $\Delta m_\mathrm{imag}$ (one intra-row step), never by the full range.
-For the typical CAS sweep grid ($18 \times 26$, $m_\mathrm{real} \in [1.55, 2.4]$, $m_\mathrm{imag} \in [0.15, 1.4]$), the maximum step size drops from $|{\Delta m}| \approx 1.25$ (raster) to $|{\Delta m}| = 0.05$ (snake), a factor of 25 improvement at each of the 17 row boundaries.
+For a grid of $14 \times 14$ points with steps of 0.1 ($1.65 \leq \mathrm{Re}\,m \leq 2.95$, $0.15 \leq \mathrm{Im}\,m \leq 1.45$) the step at each of the 13 row boundaries drops from about 1.3 (raster) to 0.1 (snake).
 
-\paragraph{GPU-accelerated batched solver with hybrid CPU parallelism.}
-An optional CUDA.jl extension provides GPU-accelerated parameter sweeps with hybrid CPU parallelism.
-For a fixed (aggregate, medium condition) group, the translation operator $\mathbf{A}$ depends only on geometry and is shared across all refractive index values.
-The GPU solver exploits this by processing $B$ RI values simultaneously: it uploads the shared FFT translation data to GPU once, then solves $B$ independent CBICG systems $(\mathbf{I} - \mathbf{T}_b \mathbf{A})\bm{x}_b = \mathbf{T}_b\bm{p}_\mathrm{inc}$ in parallel, where only $\mathbf{T}_b$ (the Mie T-matrix) varies per RI.
-$\mathbf{T}_b$ holds the Mie coefficients of every sphere at refractive index $b$, so spheres of unequal radii are treated exactly.
-Versions before v1.1.0 used the coefficients of the first sphere for all spheres in the iteration operator, which was correct for equal spheres only.
+\subsection{GPU batched solver}
+\label{sec:gpu}
 
-For large aggregates ($N_p \gtrsim 500$), the CPU phases of each batch (preparation of RHS vectors and post-processing of solutions) dominate wall time and leave the GPU idle.
-This bottleneck is addressed by three complementary measures:
+An optional CUDA.jl extension solves several refractive indices of one aggregate at once on a GPU.
+The operator $\mathbf{A}$ is the same for all refractive indices of an (aggregate, medium condition) group (Sec.~\ref{sec:multi-sphere}).
+The solver uploads the FFT translation data to the GPU once and then runs $B$ independent CBICG iterations $(\mathbf{I} - \mathbf{T}_b \mathbf{A})\bm{x}_b = \mathbf{T}_b\bm{p}_\mathrm{inc}$ in parallel.
+Only $\mathbf{T}_b$ differs between them.
+It holds the Mie coefficients of every sphere at the refractive index $b$, so spheres of unequal radii are treated exactly.
+
+For large aggregates ($N_S \gtrsim 500$) the CPU phases of each batch dominate the wall time and leave the GPU idle.
+These phases are the preparation of the right-hand sides and the post-processing of the solutions.
+Three measures address this:
 \begin{enumerate}
-  \item \textbf{Intra-group CPU parallelism}: batch preparation and post-processing are parallelised over the $B$ batch items using \texttt{Threads.@threads}, reducing the CPU-phase time by a factor of $C$ (number of Julia threads).
-  \item \textbf{Hybrid GPU+CPU dispatch}: groups with $N_p \leq$ \texttt{gpu\_np\_threshold} (default 500) are processed by CPU threads running \emph{concurrently} with the GPU task via \texttt{Threads.@spawn}, so no CPU core sits idle while the GPU handles a large-aggregate batch.
-  \item \textbf{Batched common-origin translation} (v0.4.1): the common-origin translation matrices $\mathbf{J}_{0i}$ (Eq.~\eqref{eq:common-origin}) depend only on geometry, not on the refractive index.
-  They are computed once per group (not once per RI value) and applied to all $B$ solutions simultaneously via a BLAS GEMM,
-  \[
-    (\mathbf{J}_{0i}\,\bm{a}^{(i)})_\text{batch} = \mathbf{J}_{0i} \times \bm{A}_\text{batch},
-  \]
-  where $\bm{A}_\text{batch}$ has shape $(N_\text{hnb}, 2B)$.
-  This reduces the calls of \texttt{compute\_translation\_matrix} from $N_S \times n_\text{RI}$ to $N_S$ per group.
+  \item \textbf{CPU threads within a group}: the preparation and the post-processing run over the $B$ batch items in parallel threads.
+  \item \textbf{Hybrid dispatch}: groups with $N_S \leq$ \texttt{gpu\_np\_threshold} (default 500) are computed by CPU threads while the GPU works on the larger groups.
+  \item \textbf{Batched common-origin translation}: the matrices $\mathbf{J}_{0i}$ of Eq.~\eqref{eq:common-origin} depend on the geometry only.
+  They are computed once per group and applied to all $B$ solutions in one matrix product.
+  The calls of \texttt{compute\_translation\_matrix} fall from $N_S \times n_\mathrm{RI}$ to $N_S$ per group.
 \end{enumerate}
-Running with \texttt{julia -t auto} activates all mechanisms.
-Measured with v0.4.1 on an RTX~A6000 with a 24-core CPU (CAS sweep, $N_p = 350$--$2800$, FP32 mode), the hybrid implementation achieved ${\sim}6$ jobs/s versus ${\sim}0.8$ jobs/s without threading, a factor of ${\sim}7$.
-With v1.1.0 a sweep of \num{2.02e6} jobs took \SI{30}{\hour} on the same machine ($N_p = 350$--$2800$ in steps of 50, 13 fractal dimensions with 10 aggregates each, three wavelengths with 90 to 121 refractive indices per aggregate, uniform order 3, FP32 mode).
-Three GPU processes with 8 threads each computed the groups with $N_p \geq 550$ at 17 jobs/s in total.
-One CPU process with 6 threads computed the groups with $N_p \leq 500$ at 5.4 jobs/s.
+Running with \texttt{julia -t auto} activates all three.
+
+A single-precision mode is available (\texttt{gpu\_float32=true}).
+The Mie coefficients and the right-hand sides are computed in double precision on the CPU, and the iteration runs in single precision on the GPU.
+The tolerance is then relaxed to $10^{-5}$.
+For 1000 spheres over the refractive index range of the CAS sweeps the errors of this mode were dominated by the FFT translation and not by the precision.
+
+\paragraph{Measured throughput.}
+With v1.1.0 a sweep of \num{2.02e6} jobs took \SI{30}{\hour} on a workstation with one GPU and 24 CPU threads ($N_S = 350$ to 2800 in steps of 50, 13 fractal dimensions with 10 aggregates each, three wavelengths with 90 to 121 refractive indices per aggregate, uniform order 3, single precision).
+Three GPU processes with 8 threads each computed the groups with $N_S \geq 550$ at 17 jobs per second in total.
+One CPU process with 6 threads computed the groups with $N_S \leq 500$ at 5.4 jobs per second.
 The mean number of iterations per job was 7 to 10 on the GPU.
 
-A Float32 precision mode is available (\texttt{gpu\_float32=true}): Mie coefficients and the RHS are computed in Float64 on CPU, while the iterative solver runs in ComplexF32 on GPU.
-The convergence tolerance is automatically relaxed to $10^{-5}$.
-Validation against the Fortran reference for $N_S = 1000$ spheres across the full CAS RI range shows that FP32 errors are dominated by the FFT translation approximation, not by the reduced floating-point precision.
-
-\subsection{Shared Krylov basis for refractive index sweeps}
+%% ============================================================
+\section{Shared Krylov Basis for Refractive Index Sweeps}
 \label{sec:shared-basis}
 
 Since v1.2.0 the package has a second way to sweep the refractive index of one aggregate.
 The function \texttt{sweep\_refractive\_index} solves all refractive indices with one Krylov basis.
 The option \texttt{shared\_basis} of the parameter sweep selects it.
 The default remains one CBICG solve per refractive index, so the results of sweeps without this option do not change.
+In this section $m$ without a subscript is the relative refractive index $m_\mathrm{rel}$.
+The degree of a VSWF appears as a subscript only.
 
-\paragraph{Idea.}
+\subsection{Idea}
 In a sweep over the refractive index of one aggregate at one wavelength the translation operator $\mathbf{A}$ and the incident coefficients $\bm{p}_\mathrm{inc}$ stay the same.
 Only $\mathbf{T}(m)$ changes.
 The solver of Sec.~\ref{sec:cbicg} nevertheless applies $\mathbf{A}$ again for every refractive index.
 The method below applies $\mathbf{A}$ a fixed number of times per aggregate.
 It follows the use of shifted Krylov methods for refractive index sweeps in the discrete dipole approximation (Argentin, Inzhevatkin \& Yurkin 2026).
 
-\paragraph{Shifted form.}
+\subsection{Shifted form}
 Multiplication of Eq.~\eqref{eq:global-system} by $\mathbf{T}^{-1}$ gives
 \begin{equation}
   \left(\mathbf{T}^{-1}(m) - \mathbf{A}\right)\bm{x} = \bm{p}_\mathrm{inc}.
   \label{eq:inverse-form}
 \end{equation}
-The block of $\mathbf{T}$ in Eq.~\eqref{eq:tmatrix-lr} has the eigenvalues $-a_n$ and $-b_n$.
-The block of $\mathbf{T}^{-1}$ has the same form with $1/a_n$ and $1/b_n$ in place of $a_n$ and $b_n$.
-For a sphere much smaller than the wavelength the leading terms are $a_n \propto x^{2n+1}(m^2-1)/(n m^2 + n + 1)$ and $b_n \propto x^{2n+3}(m^2-1)$.
-Their inverses are affine functions of
+The matrix $\mathbf{T}$ is the direct sum of the $2 \times 2$ blocks of Eq.~\eqref{eq:tmatrix-lr}, one for every sphere $i$, order $n$ and degree $m$ (Eq.~\eqref{eq:tmatrix-elements}).
+Each block has the eigenvalues $-a_n$ and $-b_n$ with eigenvectors that do not depend on the refractive index (Eq.~\eqref{eq:tmatrix-eigen}).
+The block of $\mathbf{T}^{-1}$ has the same form with $1/a_n$ and $1/b_n$ in place of $a_n$ and $b_n$ (Eq.~\eqref{eq:tmatrix-inverse}).
+The inverses $1/a_n$ and $1/b_n$ are close to affine functions of
 \begin{equation}
-  \sigma(m) = \frac{1}{m^2 - 1},
+  \sigma(m) = \frac{1}{m^2 - 1}.
   \label{eq:shift-function}
 \end{equation}
-because $(n m^2 + n + 1)/(m^2 - 1) = n + (2n+1)\,\sigma$.
+Section~\ref{sec:affine-basis} gives the reasons and the size of the neglected terms.
 For every sphere $i$, order $n$ and both coefficients, a least-squares fit over the refractive indices of the sweep gives
 \begin{equation}
   \frac{1}{a_n(x_i, m)} \simeq d^{(a)}_{i,n} + \mu^{(a)}_{i,n}\,\sigma(m), \qquad
@@ -558,7 +792,19 @@ For every sphere $i$, order $n$ and both coefficients, a least-squares fit over 
   \label{eq:affine-fit}
 \end{equation}
 The fit is made per sphere, so the radii may differ.
-With the block-diagonal matrices $\mathbf{D}_0$ and $\mathbf{M}$ built from $d$ and $\mu$ in the form of Eq.~\eqref{eq:tmatrix-lr}, $\mathbf{T}^{-1}(m) \simeq -(\mathbf{D}_0 + \sigma\,\mathbf{M})$ and Eq.~\eqref{eq:inverse-form} becomes
+Insertion into Eq.~\eqref{eq:tmatrix-inverse} gives the block of $\mathbf{T}^{-1}$ as
+\begin{equation}
+  \mathbf{T}_n^{-1}(m) \simeq -\left(\mathbf{D}_{0,n} + \sigma(m)\,\mathbf{M}_n\right), \qquad
+  \mathbf{D}_{0,n} = \mathbf{P}\,\mathrm{diag}\!\left(d^{(a)}, d^{(b)}\right)\mathbf{P}, \qquad
+  \mathbf{M}_n = \mathbf{P}\,\mathrm{diag}\!\left(\mu^{(a)}, \mu^{(b)}\right)\mathbf{P},
+  \label{eq:inverse-blocks}
+\end{equation}
+with the indices $i$, $n$ of $d$ and $\mu$ omitted.
+The elements of these blocks are $(d^{(a)} \pm d^{(b)})/2$ and $(\mu^{(a)} \pm \mu^{(b)})/2$.
+Every element of $\mathbf{T}^{-1}$ is thus affine in $\sigma$, because sums and differences of affine functions are affine.
+Let $\mathbf{D}_0$ and $\mathbf{M}$ be the direct sums of these blocks. They do not depend on the refractive index.
+The inverse $\mathbf{M}^{-1}$ has the blocks $\mathbf{P}\,\mathrm{diag}(1/\mu^{(a)}, 1/\mu^{(b)})\,\mathbf{P}$ and exists when no $\mu$ vanishes.
+Then $\mathbf{T}^{-1}(m) \simeq -(\mathbf{D}_0 + \sigma\,\mathbf{M})$ and Eq.~\eqref{eq:inverse-form} becomes
 \begin{equation}
   \left(\mathbf{B} + \sigma(m)\,\mathbf{I}\right)\bm{x} = -\bm{c}, \qquad
   \mathbf{B} = \mathbf{M}^{-1}\left(\mathbf{D}_0 + \mathbf{A}\right), \qquad
@@ -567,7 +813,96 @@ With the block-diagonal matrices $\mathbf{D}_0$ and $\mathbf{M}$ built from $d$ 
 \end{equation}
 The refractive index enters as a scalar shift of one matrix.
 
-\paragraph{One basis for all refractive indices.}
+\subsection{Basis of the affine form}
+\label{sec:affine-basis}
+The affine form of Eq.~\eqref{eq:affine-fit} rests on three facts.
+It is exact in the static limit.
+The pole at $m^2 = 1$ behind it is exact for every size parameter.
+The terms that it neglects are of the relative order $x^4$.
+
+Let $F_n(z) = z\,\psi_n'(z)/\psi_n(z)$.
+With $\xi_n = \psi_n + i\chi_n$ the inverses of the Mie coefficients of Eqs.~\eqref{eq:mie-an} and \eqref{eq:mie-bn} are exactly
+\begin{align}
+  \frac{1}{a_n} &= 1 + i\,\frac{m^2 x\,\chi_n'(x) - \chi_n(x)\,F_n(mx)}{m^2 x\,\psi_n'(x) - \psi_n(x)\,F_n(mx)},
+  \label{eq:inverse-an} \\
+  \frac{1}{b_n} &= 1 + i\,\frac{x\,\chi_n'(x) - \chi_n(x)\,F_n(mx)}{x\,\psi_n'(x) - \psi_n(x)\,F_n(mx)}.
+  \label{eq:inverse-bn}
+\end{align}
+The constant 1 is the radiative reaction, and it does not depend on $m$.
+The refractive index enters through $m^2$ and through $F_n(mx)$, which is an even function, $F_n(z) = n + 1 - z^2/(2n+3) + O(z^4)$.
+For a small sphere the field inside has the static radial profile $r^n$, and $F_n(mx) \simeq n + 1$.
+With the leading terms of $\psi_n(x)$ and $\chi_n(x)$ this gives
+\begin{align}
+  \frac{1}{a_n} &\simeq 1 + \frac{i\,(2n-1)!!\,(2n+1)!!}{(n+1)\,x^{2n+1}}\,\left[\,n + (2n+1)\,\sigma\,\right],
+  \label{eq:inverse-an-static} \\
+  \frac{1}{b_n} &\simeq 1 + \frac{i\,(2n+1)(2n+3)\,(2n-1)!!\,(2n+1)!!}{x^{2n+3}}\;\sigma.
+  \label{eq:inverse-bn-static}
+\end{align}
+Both are affine in $\sigma$.
+The first form uses $(n m^2 + n + 1)/(m^2 - 1) = n + (2n+1)\,\sigma$.
+For $n = 1$ Eq.~\eqref{eq:inverse-an-static} is the Clausius--Mossotti relation, $1/a_1 \simeq 1 + i\,(3/2x^3)\,(m^2+2)/(m^2-1)$.
+
+The two forms have a physical meaning.
+The polarisation of the sphere is $m^2 - 1$ times the field inside it.
+For an electric multipole the field inside is the applied field minus the depolarising field of the surface charge.
+The inverse response is then the sum of $\sigma$ and the depolarisation factor $n/(2n+1)$.
+A magnetic multipole of a non-magnetic sphere comes from the induced current.
+This current is proportional to $m^2 - 1$ and has no depolarising field, so the inverse response is proportional to $\sigma$.
+The discrete dipole approximation has the same structure: the inverse polarisability of a dipole is affine in $\sigma$, and the shift is exact there.
+For a sphere of finite size the form is approximate because the field inside departs from the static profile.
+
+The pole is exact.
+A sphere with $m = 1$ does not scatter, so $a_n = b_n = 0$ at $m^2 = 1$ for every $x$.
+The denominators of Eqs.~\eqref{eq:inverse-an} and \eqref{eq:inverse-bn} have a simple zero there, and
+\begin{equation}
+  \frac{1}{a_n} = \mu\,\sigma + d + c_1\,(m^2 - 1) + c_2\,(m^2 - 1)^2 + \dots,
+  \label{eq:inverse-laurent}
+\end{equation}
+with coefficients that depend on $x$ and $n$ only.
+The same holds for $1/b_n$.
+Equation~\eqref{eq:affine-fit} keeps the first two terms.
+The series converges up to the nearest other zero of $a_n$ or $b_n$ in the plane of $m^2$.
+For small $x$ these zeros lie where the field inside the sphere has a radial node: near the zeros of $j_n(mx)$ for $a_n$ and of $j_{n+1}(mx)$ for $b_n$.
+For $n = 1$ this is $|m|\,x \approx 4.49$ and $5.76$.
+The neglected terms are small as long as $|m|\,x$ is well below these values.
+The expansion of $a_1$ in powers of $x$ (BH83, Sec.~5.1) shows the order at which they enter:
+\begin{equation}
+  \frac{1}{a_1} = 1 + i\left[\frac{3}{2x^3}\,(1 + 3\sigma) - \frac{9}{10\,x}\,(1 - \sigma)\right] + O(x).
+  \label{eq:inverse-a1-expansion}
+\end{equation}
+The correction of the relative order $x^2$ is still affine in $\sigma$.
+The departure from the affine form appears at the relative order $x^4$.
+
+Table~\ref{tab:affine-remainder} confirms this for single spheres.
+The remainder of the fit grows by a factor of 16 when $x$ doubles, and it is largest for $a_1$.
+The fitted $\mu$ and $d$ differ from the static values of Eqs.~\eqref{eq:inverse-an-static} and \eqref{eq:inverse-bn-static} by \SIrange{0.1}{0.6}{\percent} at $x = 0.1$, in agreement with Eq.~\eqref{eq:inverse-a1-expansion}.
+The fit is made over the refractive indices of the sweep and not at $m^2 = 1$, so $\mu$ and $d$ absorb a part of the higher terms.
+
+\begin{table}[htbp]
+\caption{Largest relative remainder of the affine fit of Eq.~\eqref{eq:affine-fit} for one sphere. The fit covers 195 refractive indices with $1.35 \leq \mathrm{Re}\,m \leq 2.55$ and $0.15 \leq \mathrm{Im}\,m \leq 1.55$.}
+\label{tab:affine-remainder}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} cccccc @{}}
+\toprule
+$x$ & $\max|m|\,x$ & $1/a_1$ & $1/b_1$ & $1/a_2$ & $1/a_3$ \\
+\midrule
+0.05 & 0.15 & \num{1.7e-7} & \num{8.3e-8} & \num{3.9e-8} & \num{1.3e-8} \\
+0.1  & 0.30 & \num{2.7e-6} & \num{1.3e-6} & \num{6.2e-7} & \num{2.2e-7} \\
+0.2  & 0.60 & \num{4.5e-5} & \num{2.2e-5} & \num{1.0e-5} & \num{3.5e-6} \\
+0.4  & 1.19 & \num{7.7e-4} & \num{3.7e-4} & \num{1.6e-4} & \num{5.6e-5} \\
+0.8  & 2.39 & \num{1.6e-2} & \num{7.1e-3} & \num{3.0e-3} & \num{9.7e-4} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two properties of the method follow from Eq.~\eqref{eq:inverse-laurent}.
+The leading neglected term $c_1\,(m^2 - 1)$ has the same dependence on $m$ in every channel, which is why the remainder matrix of Sec.~\ref{sec:affine-remainder} is close to rank one.
+The residual floor of the basis grows as $x^4$ and is ordered by $|m|\,x$ (Sec.~\ref{sec:shared-basis-limits}).
+The affine form is used only to build the basis.
+The solution of each refractive index is accepted on the true residual of Eq.~\eqref{eq:global-system} with the exact $\mathbf{T}(m)$.
+
+\subsection{One basis for all refractive indices}
 The Krylov subspace
 \begin{equation}
   \mathcal{K}_K(\mathbf{B} + \sigma\mathbf{I}, \bm{c}) = \mathrm{span}\{\bm{c},\, \mathbf{B}\bm{c},\, \dots,\, \mathbf{B}^{K-1}\bm{c}\}
@@ -589,10 +924,11 @@ For each refractive index the GMRES solution of Eq.~\eqref{eq:shifted-system} in
 \end{equation}
 where $\beta = \|\bm{c}\|$, $\bm{e}_1$ is the first unit vector and $\bar{\mathbf{I}}_K$ is the identity matrix with a row of zeros appended.
 The work per refractive index is of order $K^3$.
-The basis grows until the residual of Eq.~\eqref{eq:small-problem} is below a threshold for every refractive index of the sweep.
-The threshold is $0.03\sqrt{\varepsilon}$ by default (keyword \texttt{basis\_tol}), and the basis has at most 100 vectors per polarisation (keyword \texttt{max\_basis}).
+The basis grows until the residual of Eq.~\eqref{eq:small-problem} is below the basis tolerance $\varepsilon_\mathrm{b}$ for every refractive index of the sweep.
+The default is $\varepsilon_\mathrm{b} = 0.03\sqrt{\varepsilon}$ (keyword \texttt{basis\_tol}), and the basis has at most 100 vectors per polarisation (keyword \texttt{max\_basis}).
 
-\paragraph{Remainder of the affine fit.}
+\subsection{Remainder of the affine fit}
+\label{sec:affine-remainder}
 The remainder of Eq.~\eqref{eq:affine-fit}, divided by $\mu$, is a matrix over the channels (sphere, order, coefficient) and the refractive indices.
 Its singular values fall quickly.
 For monomers with $x \leq 0.25$ they were \num{2.8e-3}, \num{4e-6} and \num{8.5e-9}.
@@ -608,26 +944,72 @@ needs no application of $\mathbf{A}$ and serves as the error indicator for each 
 The basis itself comes from the affine model.
 The residual therefore does not fall below a floor that the remainder sets, however large $K$ is.
 
-\paragraph{Convergence criterion and fallback.}
+\subsection{Convergence criterion and fallback}
 A refractive index counts as converged if $\|\bm{r}\|^2 / \|\mathbf{T}\bm{p}_\mathrm{inc}\|^2 < \varepsilon$ for both polarisations, with the true residual of Eq.~\eqref{eq:true-residual}.
 This is the criterion of the CBICG solver with the same tolerance $\varepsilon$.
 A refractive index that does not meet it in the basis is solved by CBICG with $\mathbf{V}_K\,\bm{y}$ as the initial guess (keyword \texttt{fallback}, on by default).
 Every result therefore meets the tolerance, whatever the monomer size and the refractive index.
 What is lost outside the range of the method is the gain in time.
 
-\paragraph{Truncation order.}
+\subsection{Truncation order of a sweep}
 The basis needs one system of equations for all refractive indices.
 All spheres and all refractive indices of a sweep therefore use one truncation order.
 It is the largest of the single-sphere orders of Eq.~\eqref{eq:nstop}, of a user-specified order and, in a parameter sweep with \texttt{truncation\_eps}, of the contact orders of Sec.~\ref{sec:contact-order} over the refractive index grid.
 The solve per refractive index lets the order follow the refractive index instead.
 The two kinds of sweep thus differ at the level of the truncation error, and the parameter sweep does not let them share an output file.
 
-\paragraph{Outputs.}
+\subsection{Outputs of a sweep}
 The common-origin coefficients of Eq.~\eqref{eq:common-origin} are linear in $\bm{x}$.
 The translation to the common origin is applied once to every basis vector.
 The amplitudes and the efficiencies of each refractive index then follow from $\bm{y}$ with work of order $K$.
 
-\paragraph{Measured accuracy and time.}
+\subsection{Algorithm}
+The function \texttt{sweep\_refractive\_index} carries out the steps of Table~\ref{tab:shared-basis-algorithm} in the order given there.
+Steps 1 to 11 are done once for an aggregate at one wavelength.
+Steps 12 to 15 are repeated for every refractive index and need no application of $\mathbf{A}$.
+The operator $\mathbf{A}$ is applied $K_1 + K_2$ times in total, where $K_q$ is the basis size of the incident polarisation $q$.
+The method keeps $K_q + 1$ basis vectors and $K_q$ products $\mathbf{A}\bm{v}_k$ for each polarisation.
+A sweep with a single sphere or with fewer than three refractive indices has no use for a basis and is solved by CBICG.
+
+\begin{table}[htbp]
+\caption{Refractive index sweep with a shared Krylov basis.}
+\label{tab:shared-basis-algorithm}
+\centering
+\renewcommand{\arraystretch}{1.3}
+% one numbered step: number in a box, continuation lines aligned with the text
+\newcommand{\algstep}[2]{\hangindent=3.0em\hangafter=1\hspace*{1.0em}\makebox[2.0em][l]{#1.}#2}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.95\textwidth}@{}}
+\toprule
+\textbf{Input:} $\mathbf{A}$; $\bm{p}_{\mathrm{inc},q}$ for $q = 1, 2$; refractive indices $m_1, \dots, m_J$; tolerance $\varepsilon$; basis tolerance $\varepsilon_\mathrm{b} = 0.03\sqrt{\varepsilon}$; largest basis size $K_\mathrm{max} = 100$; number of correction terms $S = 2$. \\[4pt]
+\textbf{Affine model} (once): \\[2pt]
+\algstep{1}{Mie coefficients $a_n(x_i, m_j)$, $b_n(x_i, m_j)$ of all spheres, orders and refractive indices, with one truncation order.} \\
+\algstep{2}{$\sigma_j = 1/(m_j^2 - 1)$. Least-squares fit of Eq.~\eqref{eq:affine-fit} over $j$ for every channel gives $d$, $\mu$ and the matrices $\mathbf{D}_0$, $\mathbf{M}$ of Eq.~\eqref{eq:inverse-blocks}.} \\
+\algstep{3}{Remainder matrix $\mathbf{R}$ with one row per channel and one column per refractive index: $(1/a_n - d - \mu\,\sigma_j)/\mu$, and the same with $b_n$.} \\
+\algstep{4}{Singular value decomposition $\mathbf{R} = \sum_s \varsigma_s\,\bm{u}_s\,\bm{v}_s^\dagger$. For $s = 1, \dots, S$: $\mathbf{M}^{-1}\mathbf{E}_s$ is the block-diagonal matrix with the eigenvalues $\varsigma_s\,\bm{u}_s$, in the form of Eq.~\eqref{eq:inverse-blocks}, and $g_s(m_j) = (\bm{v}_s^*)_j$.} \\[4pt]
+\textbf{Basis} (once for each polarisation $q$): \\[2pt]
+\algstep{5}{$\bm{c} = \mathbf{M}^{-1}\bm{p}_{\mathrm{inc},q}$, \; $\beta = \|\bm{c}\|$, \; $\bm{v}_1 = \bm{c}/\beta$.} \\
+\hspace*{1.0em}\textbf{For} $k = 1, 2, \ldots, K_\mathrm{max}$: \\
+\algstep{6}{$\bm{w}_k = \mathbf{A}\,\bm{v}_k$ \hfill (1 application of $\mathbf{A}$; $\bm{w}_k$ is kept)} \\
+\algstep{7}{$\bm{z} = \mathbf{M}^{-1}\left(\mathbf{D}_0\,\bm{v}_k + \bm{w}_k\right)$ \hfill ($\bm{z} = \mathbf{B}\,\bm{v}_k$)} \\
+\algstep{8}{Twice: $\bm{h} = \mathbf{V}_k^\dagger\,\bm{z}$, \; $\bm{z} \leftarrow \bm{z} - \mathbf{V}_k\,\bm{h}$, \; $H_{1:k,\,k} \leftarrow H_{1:k,\,k} + \bm{h}$ \hfill (Gram--Schmidt)} \\
+\algstep{9}{$H_{k+1,\,k} = \|\bm{z}\|$. If $\|\bm{z}\| \leq 10^{-14}\beta$: $K_q = k$, \textbf{stop}. Otherwise $\bm{v}_{k+1} = \bm{z}/\|\bm{z}\|$.} \\
+\algstep{10}{At $k = 8$ and then after every further $\max(2, \lfloor k/8 \rfloor)$ steps, test the affine model: $\eta = \max_j \min_{\bm{y}} \left\| -\beta\,\bm{e}_1 - \left(\bar{\mathbf{H}}_k + \sigma_j\,\bar{\mathbf{I}}_k\right)\bm{y} \right\| / \beta$. If $\eta < \varepsilon_\mathrm{b}$: $K_q = k$, \textbf{stop}.} \\
+\algstep{11}{With $K = K_q$: $\mathbf{C}_s = \mathbf{V}_{K+1}^\dagger\,\mathbf{M}^{-1}\mathbf{E}_s\,\mathbf{V}_K$ for $s = 1, \dots, S$; the common-origin coefficients of every $\bm{v}_k$ (Eqs.~\eqref{eq:common-origin} and \eqref{eq:mode-transform}), which form the columns of $\mathbf{G}^{(1)}$ and $\mathbf{G}^{(2)}$ for the two modes; and $\bm{f} = \mathbf{V}_K^\dagger\,\bm{p}_{\mathrm{inc},q}$.} \\[4pt]
+\textbf{Solution} (for every $m_j$; steps 12 and 13 for each polarisation): \\[2pt]
+\algstep{12}{Least-squares problem with $K+1$ equations and $K$ unknowns: $\bm{y} = \arg\min_{\bm{y}} \left\| -\beta\,\bm{e}_1 - \left(\bar{\mathbf{H}}_K + \sigma_j\,\bar{\mathbf{I}}_K + \sum_{s} g_s(m_j)\,\mathbf{C}_s\right)\bm{y} \right\|$} \\
+\algstep{13}{$\bm{r} = \mathbf{T}(m_j)\left(\bm{p}_{\mathrm{inc},q} + \mathbf{W}_K\,\bm{y}\right) - \mathbf{V}_K\,\bm{y}$ with the exact $\mathbf{T}(m_j)$, where $\mathbf{W}_K = (\bm{w}_1, \dots, \bm{w}_K)$.} \\
+\algstep{14}{If $\|\bm{r}\|^2 / \|\mathbf{T}(m_j)\,\bm{p}_{\mathrm{inc},q}\|^2 < \varepsilon$ for both polarisations: common-origin coefficients $\mathbf{G}^{(1)}\bm{y}$ and $\mathbf{G}^{(2)}\bm{y}$, then the amplitudes (Eq.~\eqref{eq:amplitude-sum}), $Q_\mathrm{sca}$ (Eq.~\eqref{eq:qsca}) and $Q_\mathrm{ext}$ (Eq.~\eqref{eq:qext} with $\bm{a}_q^\dagger\,\bm{p}_{\mathrm{inc},q} = \bm{y}^\dagger\bm{f}$).} \\
+\algstep{15}{Otherwise: CBICG (Table~\ref{tab:cbicg}) for this refractive index with the initial guess $\bm{x}_0 = \mathbf{V}_K\,\bm{y}$, and the outputs from its solution.} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three points of the table differ from a textbook GMRES.
+The basis is built without a right-hand side that depends on the refractive index: steps 5 to 10 use only $\mathbf{D}_0$, $\mathbf{M}$ and $\mathbf{A}$.
+The stopping test of step 10 is that of the affine model for the hardest refractive index of the sweep.
+The acceptance of a solution in step 14 does not rely on the affine model, because step 13 uses the exact $\mathbf{T}(m_j)$.
+
+\subsection{Measured accuracy and time}
 Table~\ref{tab:shared-basis-time} compares the method with the CBICG solver at the default tolerance.
 The numbers were measured with the functions of the package (v1.2.0) on one thread of a server with Xeon E5-2620 v4 processors.
 The aggregates are those of the black-carbon sweep, with monomer size parameters of 0.09 to 0.14 at \SI{834}{\nano\meter} and 0.17 to 0.25 at \SI{453}{\nano\meter}.
@@ -645,11 +1027,11 @@ In an earlier test with a prototype of the method, twelve processes on a 24-thre
 
 The option of the parameter sweep was compared with the default on six aggregates and 100 refractive indices ($1.65 \leq \mathrm{Re}\,m \leq 2.55$, $0.55 \leq \mathrm{Im}\,m \leq 1.45$), with six threads and the uniform order 3.
 The default uses the continuation of Sec.~\ref{sec:continuation} and needs 4 to 7 iterations per refractive index.
-For $N_p = 1500$ at \SI{834}{\nano\meter} the sweep took \SI{17.6}{\second} with the shared basis and \SI{485}{\second} without, a factor of 28.
-For $N_p = 350$ at \SI{453}{\nano\meter} it took \SI{3.4}{\second} and \SI{67}{\second}, a factor of 20.
+For $N_S = 1500$ at \SI{834}{\nano\meter} the sweep took \SI{17.6}{\second} with the shared basis and \SI{485}{\second} without, a factor of 28.
+For $N_S = 350$ at \SI{453}{\nano\meter} it took \SI{3.4}{\second} and \SI{67}{\second}, a factor of 20.
 The factors are smaller than those of Table~\ref{tab:shared-basis-time} because the sweep has half as many refractive indices and the default starts every solve from the previous solution.
 All 600 rows of each sweep converged, and no row needed the fallback.
-The rows of the two methods differ by at most \num{5e-4} in the forward amplitudes and by at most \num{6e-3} in the backward amplitudes, which is the error that the default tolerance leaves in the CBICG results.
+The rows of the two methods differ by at most \num{5e-4} in the forward amplitudes and by at most \num{6e-3} in the backward amplitudes, which is the error that the default tolerance leaves in the CBICG results (Sec.~\ref{sec:cbicg-tolerance}).
 
 \begin{table}[htbp]
 \caption{Sweep over 195 or 196 refractive indices of one aggregate on one thread, FFT translation, setup of the translation included. ``8/4'' is the truncation order 8 with the far order 4 of Sec.~\ref{sec:fft-far-order}. $t_\mathrm{C}$ is the time of CBICG with $\varepsilon = 10^{-6}$ and cold start, $t_\mathrm{S}$ the time of the shared basis. The errors of $S_1$, $S_2$ are those of the shared basis.}
@@ -658,7 +1040,7 @@ The rows of the two methods differ by at most \num{5e-4} in the forward amplitud
 \renewcommand{\arraystretch}{1.2}
 \begin{tabular}{@{} rrrcrrrrrr @{}}
 \toprule
-$N_p$ & $D_f$ & $\lambda$ (\si{\nano\meter}) & Order & $K$ & $t_\mathrm{C}$ (\si{\second}) & $t_\mathrm{S}$ (\si{\second}) & $t_\mathrm{C}/t_\mathrm{S}$ & Forward & Backward \\
+$N_S$ & $D_f$ & $\lambda$ (\si{\nano\meter}) & Order & $K$ & $t_\mathrm{C}$ (\si{\second}) & $t_\mathrm{S}$ (\si{\second}) & $t_\mathrm{C}/t_\mathrm{S}$ & Forward & Backward \\
 \midrule
 1500 & 2.65 & 834 & 3   & 14 &  1016 &  11.0 &  92 & \num{1.6e-5} & \num{2.7e-5} \\
 1500 & 2.65 & 453 & 3   & 18 &  1316 &  12.6 & 104 & \num{2.3e-5} & \num{2.1e-4} \\
@@ -674,11 +1056,12 @@ $N_p$ & $D_f$ & $\lambda$ (\si{\nano\meter}) & Order & $K$ & $t_\mathrm{C}$ (\si
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{shared_basis_times.pdf}
-\caption{Times of Table~\ref{tab:shared-basis-time} on a logarithmic axis. ``Order 8/4'' is the truncation order 8 with the far order 4.}
+\caption{Times of Table~\ref{tab:shared-basis-time} on a logarithmic axis. $N$ is the number of monomers $N_S$. ``Order 8/4'' is the truncation order 8 with the far order 4.}
 \label{fig:shared-basis-times}
 \end{figure}
 
-\paragraph{Limits and validated range.}
+\subsection{Limits and validated range}
+\label{sec:shared-basis-limits}
 The method needs one refractive index for all spheres of an aggregate.
 A new basis is needed for every geometry and wavelength.
 The floor of the residual grows with the monomer size, roughly as $x^4$ for small $x$ and faster above $x \approx 0.5$.
@@ -689,7 +1072,7 @@ The error of the forward amplitudes is 0.25 to 0.6 times the floor and that of t
 
 Figure~\ref{fig:shared-basis-limits} shows the error of the basis alone as a function of the mean monomer size parameter for four ranges of the refractive index.
 Table~\ref{tab:shared-basis-limits} gives the mean size parameter up to which the error stays below $10^{-3}$ and $10^{-2}$.
-The truncation order is the contact order of Sec.~\ref{sec:contact-order} with $\epsilon = 10^{-2}$, the largest over the range.
+The truncation order is the contact order of Sec.~\ref{sec:contact-order} with $\epsilon_\mathrm{t} = 10^{-2}$, the largest over the range.
 The test geometry is the central 60 spheres of an aggregate with $D_f = 2.65$, with direct translation.
 Whole aggregates are treated below.
 The radii have a relative standard deviation of 0.1 and the largest sphere is 1.22 times the mean.
@@ -709,26 +1092,24 @@ In point contact they have no converged truncation order (Table~\ref{tab:contact
 Table~\ref{tab:shared-basis-whole} repeats the test for whole aggregates of 350, 1500 and 2800 monomers with the wider black-carbon range ($1.45 \leq \mathrm{Re}\,m \leq 2.55$, $0.35 \leq \mathrm{Im}\,m \leq 1.55$).
 The translation uses the FFT with the far order 6, and the reference solutions use the same operator.
 The errors are the largest over two refractive indices, one of them the refractive index with the largest residual.
-For the whole aggregates they are the errors of the largest basis tested, which has 64 vectors and 96 vectors for $N_p = 2800$.
+For the whole aggregates they are the errors of the largest basis tested, which has 64 vectors and 96 vectors for $N_S = 2800$.
 The forward amplitudes of the whole aggregates are as accurate as those of the fragment or more accurate, so the forward limits of Table~\ref{tab:shared-basis-limits} hold for them.
 The backward amplitudes are less accurate.
 From a mean size parameter of 0.5 their error lies between \num{2e-3} and \num{1.4e-2} for the whole aggregates.
-This is a property of the backward amplitude of a large aggregate and not of the shared basis alone.
-The CBICG solution with $\varepsilon = 10^{-6}$ differs from the reference in the backward amplitudes by \num{1.5e-2} for $N_p = 1500$ and $x = 0.5$.
-For $N_p = 2800$ it differs by \num{5.7e-3} at $x = 0.5$ and by \num{1.6e-2} at $x = 0.6$.
-A smaller tolerance is needed in both methods when backward amplitudes of large aggregates with such monomers are required.
+This is a property of the backward amplitude of a large aggregate and not of the shared basis alone (Sec.~\ref{sec:cbicg-tolerance}).
+The CBICG solution with $\varepsilon = 10^{-6}$ differs from the reference in the backward amplitudes by \num{1.5e-2} for $N_S = 1500$ at $x = 0.5$, and for $N_S = 2800$ by \num{5.7e-3} at $x = 0.5$ and by \num{1.6e-2} at $x = 0.6$.
 The basis size grows from 16 for the fragment to 24 to 64 for the whole aggregates.
-For $N_p = 2800$ the residual is within a factor of two of its floor at 48 vectors, but the backward amplitudes settle only with 64 to 96 vectors.
+For $N_S = 2800$ the residual is within a factor of two of its floor at 48 vectors, but the backward amplitudes settle only with 64 to 96 vectors.
 With 64 vectors their error is \num{2.0e-3} at $x = 0.5$ and \num{1.5e-2} at $x = 0.6$.
 
 \begin{table}[htbp]
-\caption{Relative error of the shared-basis sweep without the fallback in $S_1$, $S_2$ for the fragment of Table~\ref{tab:shared-basis-limits} ($N_p = 60$) and for whole aggregates, with the wider black-carbon range and the truncation orders 10 to 11. $K$ is the basis size at which the residual stops falling.}
+\caption{Relative error of the shared-basis sweep without the fallback in $S_1$, $S_2$ for the fragment of Table~\ref{tab:shared-basis-limits} ($N_S = 60$) and for whole aggregates, with the wider black-carbon range and the truncation orders 10 to 11. $K$ is the basis size at which the residual stops falling.}
 \label{tab:shared-basis-whole}
 \centering
 \renewcommand{\arraystretch}{1.2}
 \begin{tabular}{@{} rrcrrr @{}}
 \toprule
-$N_p$ & $D_f$ & Mean $x$ & $K$ & Forward & Backward \\
+$N_S$ & $D_f$ & Mean $x$ & $K$ & Forward & Backward \\
 \midrule
   60 & 2.65 & 0.4 & 16 & \num{9.1e-5} & \num{4.3e-4} \\
 1500 & 2.65 & 0.4 & 24 & \num{8.5e-5} & \num{5.3e-4} \\
@@ -758,7 +1139,7 @@ The code issues a warning when a sweep lies outside the range
   \label{eq:shared-basis-range}
 \end{equation}
 (function \texttt{shared\_basis\_range\_issues}).
-Inside it the basis alone gave errors below \num{2e-4} in the forward amplitudes and below $10^{-3}$ in the backward amplitudes in all cases of Table~\ref{tab:shared-basis-limits} and in the one case of Table~\ref{tab:shared-basis-whole} that lies inside it ($N_p = 1500$, $x = 0.4$).
+Inside it the basis alone gave errors below \num{2e-4} in the forward amplitudes and below $10^{-3}$ in the backward amplitudes in all cases of Table~\ref{tab:shared-basis-limits} and in the one case of Table~\ref{tab:shared-basis-whole} that lies inside it ($N_S = 1500$, $x = 0.4$).
 The limits of that table lie outside this range because they refer to the larger errors $10^{-3}$ and $10^{-2}$.
 
 \begin{table}[htbp]
@@ -780,32 +1161,14 @@ $\mathrm{Re}\,m$ & $\mathrm{Im}\,m$ & Order & $10^{-3}$ & $10^{-2}$ & $10^{-3}$ 
 \end{tabular}
 \end{table}
 
-\subsection{Incident plane wave coefficients}
-\label{sec:incident}
-
-For $z$-axis incidence ($\beta = 0$, $\alpha = 0$), only the $m = \pm 1$ multipole components are non-zero due to the azimuthal symmetry of a circularly decomposed plane wave.
-In the lr\_tran basis, the incident field coefficients for sphere $i$ are:
-\begin{equation}
-  p_{mn,p=1,q=1}^{(i)} = i^{\,n+1}\sqrt{\frac{2n+1}{2}}\;\delta_{m,+1}\;e^{iz_i}, \qquad
-  p_{mn,p=2,q=1}^{(i)} = -i^{\,n+1}\sqrt{\frac{2n+1}{2}}\;\delta_{m,-1}\;e^{iz_i}
-  \label{eq:pinc-q1}
-\end{equation}
-for the first incident polarisation ($q = 1$), and
-\begin{equation}
-  p_{mn,p=1,q=2}^{(i)} = -i^{\,n+2}\sqrt{\frac{2n+1}{2}}\;\delta_{m,+1}\;e^{iz_i}, \qquad
-  p_{mn,p=2,q=2}^{(i)} = -i^{\,n+2}\sqrt{\frac{2n+1}{2}}\;\delta_{m,-1}\;e^{iz_i}
-  \label{eq:pinc-q2}
-\end{equation}
-for $q = 2$.
-The phase factor $e^{iz_i}$ accounts for the spatial position of sphere $i$ along the propagation direction.
-
 %% ============================================================
 \section{Output Quantities}
 \label{sec:output}
 
 \subsection{Translation to a common origin}
+\label{sec:common-origin}
 
-After solving for the per-sphere scattered-field coefficients $\bm{a}^{(i)}$, all coefficients are re-expanded about a common origin $\bm{r}_0$ (typically the aggregate centroid) using regular (Bessel $j_n$) translation:
+After solving for the per-sphere scattered-field coefficients $\bm{a}^{(i)}$, all coefficients are re-expanded about a common origin $\bm{r}_0$ (typically the aggregate centroid) using the regular translation of Sec.~\ref{sec:translation}:
 \begin{equation}
   \bm{a}_0 = \sum_{i=1}^{N_S} \mathbf{J}_{0i}\,\bm{a}^{(i)}
   \label{eq:common-origin}
@@ -813,13 +1176,16 @@ After solving for the per-sphere scattered-field coefficients $\bm{a}^{(i)}$, al
 where $\mathbf{J}_{0i}$ is the regular translation matrix from sphere $i$ to the common origin.
 The translation order for each sphere is determined by a convergence test on the translation addition theorem (Fortran routine \texttt{tranordertest}), ensuring that the re-expansion captures the scattered field to a specified accuracy.
 
-The common-origin lr\_tran coefficients are then transformed from the $(p=1, p=2)$ basis to mode-indexed form:
+The order $N_0$ of the expansion about the origin is the largest of these translation orders.
+
+The common-origin lr\_tran coefficients are then transformed to the mode coefficients by Eq.~\eqref{eq:lr-coefficient-relation}:
 \begin{equation}
-  a_{mn}^{(\text{mode}\,1)} = a_{mn}^{(p=1)} + a_{mn}^{(p=2)}, \qquad
-  a_{mn}^{(\text{mode}\,2)} = a_{mn}^{(p=1)} - a_{mn}^{(p=2)}.
+  c_{0,mn,1} = a_{0,mn,1} + a_{0,mn,2}, \qquad
+  c_{0,mn,2} = a_{0,mn,1} - a_{0,mn,2}.
   \label{eq:mode-transform}
 \end{equation}
-These mode-1 and mode-2 coefficients correspond to the standard TE and TM VSWF expansion of the total scattered field about the common origin (Mackowski 1994, \S 3).
+They are the coefficients of the TM and TE VSWFs in the expansion of the total scattered field about the common origin (Mackowski 1994).
+A superscript $(q)$ marks the incident polarisation where it is needed.
 
 \subsection{Scattering amplitude matrix (BH83 convention)}
 
@@ -834,20 +1200,25 @@ The far-field scattered wave is described by the $2 \times 2$ amplitude matrix (
 where $S_1, S_2, S_3, S_4$ are dimensionless complex functions of the scattering angles $(\theta, \phi)$.
 
 For the forward ($\theta = 0^\circ$) and backward ($\theta = 180^\circ$) directions only the $m = \pm 1$ terms of the common-origin expansion survive.
-The amplitudes are computed from the mode coefficients as
+The amplitudes are computed from the mode coefficients $c_{0,mn,t}^{(q)}$ of Eq.~\eqref{eq:mode-transform} as $S_j = -2\,s_j$ with
 \begin{equation}
-  S_j = -2 \sum_{n=1}^{N_\mathrm{max}} \sum_{m = \pm 1} \sum_{p = 1}^{2}
-  F_j(n, m, p)\;\tau_{m,n,p}(\theta)
+\begin{aligned}
+  s_2 &= \sum_{n=1}^{N_0} i\,(-i)^n \sum_{m=\pm 1} \sum_{t=1}^{2} \tau_{m,n,t}(\theta)\; c_{0,mn,t}^{(1)}, &\qquad
+  s_4 &= \sum_{n=1}^{N_0} (-i)^n \sum_{m=\pm 1} \sum_{t=1}^{2} \tau_{m,n,3-t}(\theta)\; c_{0,mn,t}^{(1)}, \\
+  s_3 &= -\sum_{n=1}^{N_0} i\,(-i)^n \sum_{m=\pm 1} \sum_{t=1}^{2} \tau_{m,n,t}(\theta)\; c_{0,mn,t}^{(2)}, &\qquad
+  s_1 &= -\sum_{n=1}^{N_0} (-i)^n \sum_{m=\pm 1} \sum_{t=1}^{2} \tau_{m,n,3-t}(\theta)\; c_{0,mn,t}^{(2)}.
+\end{aligned}
   \label{eq:amplitude-sum}
 \end{equation}
-where $F_j$ selects the appropriate combination of mode coefficients and incident polarisation (mode-1 from $q=1$, mode-2 from $q=1$ for $S_2$, $S_4$; similarly with sign change from $q=2$ for $S_1$, $S_3$), and $\tau_{m,n,p}(\theta)$ are angular functions derived from the Wigner $d$-matrix at $\cos\theta$.
+The first incident polarisation gives $S_2$ and $S_4$, and the second gives $S_1$ and $S_3$.
+The angular functions $\tau_{m,n,t}(\theta)$ derive from the Wigner d-matrix (routine \texttt{taufunc} of MSTM).
 
-At $\theta = 0^\circ$ the angular functions simplify to (Mackowski \& Mishchenko 2011, \texttt{taufunc} routine):
+At $\theta = 0^\circ$ they are
 
 \begin{center}
 \begin{tabular}{@{} ccc @{}}
   \toprule
-  $m$ & $p$ & $\tau_{m,n,p}(0^\circ)$ \\
+  $m$ & $t$ & $\tau_{m,n,t}(0^\circ)$ \\
   \midrule
   $+1$ & 1 & $-f_n$ \\
   $+1$ & 2 & $-f_n$ \\
@@ -858,12 +1229,12 @@ At $\theta = 0^\circ$ the angular functions simplify to (Mackowski \& Mishchenko
 \end{center}
 where $f_n = \frac{1}{4}\sqrt{(2n+1)/2}$.
 
-At $\theta = 180^\circ$ an additional factor of $(-1)^n$ appears, and the signs of the $p = 1$ vs $p = 2$ contributions differ:
+At $\theta = 180^\circ$ an additional factor of $(-1)^n$ appears, and the signs of the two modes differ:
 
 \begin{center}
 \begin{tabular}{@{} ccc @{}}
   \toprule
-  $m$ & $p$ & $\tau_{m,n,p}(180^\circ)$ \\
+  $m$ & $t$ & $\tau_{m,n,t}(180^\circ)$ \\
   \midrule
   $+1$ & 1 & $-(-1)^n f_n$ \\
   $+1$ & 2 & $+(-1)^n f_n$ \\
@@ -881,7 +1252,7 @@ For general aggregates lacking such symmetry, all four elements are non-zero.
 
 The dimensionless efficiency factors are defined as $Q = C / (\pi\,a_\mathrm{eff}^2)$ where $C$ is the corresponding cross section, and computed for unpolarised incidence by averaging over the two incident polarisations $q = 1, 2$.
 
-\textbf{Extinction efficiency} (optical theorem, Mackowski 1994, Eq.~12):
+\textbf{Extinction efficiency} (optical theorem, Mackowski 1994):
 \begin{equation}
   Q_\mathrm{ext} = -\frac{2}{x_\mathrm{eff}^2}
   \sum_{q=1}^{2} \mathrm{Re}\!\left(\bm{a}_q^\dagger \,\bm{p}_{\mathrm{inc},q}\right)
@@ -891,14 +1262,14 @@ where the inner product $\bm{a}_q^\dagger \bm{p}_{\mathrm{inc},q}$ is evaluated 
 This is the multi-sphere generalisation of the forward-scattering (optical) theorem: the extinction is determined entirely by the projection of the scattered-field coefficients onto the incident-field pattern.
 The factor of 2 (instead of 4) in the prefactor arises from averaging the cross section over the two incident orthogonal polarisation states ($q=1, 2$).
 
-\textbf{Scattering efficiency} (from the coherent common-origin expansion, Mackowski 1994, Eq.~13):
+\textbf{Scattering efficiency} (from the coherent common-origin expansion, Mackowski 1994):
 \begin{equation}
   Q_\mathrm{sca} = \frac{1}{x_\mathrm{eff}^2}
-  \sum_{q=1}^{2} \left(\|\bm{a}_{0,q}^{(\text{mode}\,1)}\|^2 + \|\bm{a}_{0,q}^{(\text{mode}\,2)}\|^2 \right)
+  \sum_{q=1}^{2} \sum_{t=1}^{2} \sum_{n=1}^{N_0} \sum_{m=-n}^{n} \left| c_{0,mn,t}^{(q)} \right|^2
   \label{eq:qsca}
 \end{equation}
-where the norm is the sum of squared magnitudes of all common-origin expansion coefficients for incident polarisation $q$.
-This requires the common-origin re-expansion (Sec.~\ref{sec:output}, first subsection), which coherently accounts for the relative phases of all spheres.
+with the mode coefficients of Eq.~\eqref{eq:mode-transform}.
+This requires the common-origin re-expansion of Sec.~\ref{sec:common-origin}, which accounts for the relative phases of all spheres.
 
 \textbf{Absorption efficiency:}
 \begin{equation}
@@ -950,26 +1321,27 @@ The cluster T-matrix $\mathbf{T}^\mathrm{cl}$ maps the coefficients $\bm{p}_0$ o
 \end{equation}
 Both vectors are in the lr\_tran basis with the combined index $(mn, p)$.
 The origin $\bm{r}_0$ is the centroid of the sphere centres.
-The order $N_0$ of the expansion about the origin is the largest translation order of Sec.~\ref{sec:output} over all spheres, so $\mathbf{T}^\mathrm{cl}$ is a square matrix of size $K = 2N_0(N_0+2)$.
+The order of the expansion about the origin is $N_0$ of Sec.~\ref{sec:common-origin}, so $\mathbf{T}^\mathrm{cl}$ is a square matrix of size $N_\mathrm{cl} = 2N_0(N_0+2)$.
 The matrix depends on the geometry, the size and $m_\mathrm{rel}$.
 It does not depend on the orientation.
 
-Column $\nu$ of $\mathbf{T}^\mathrm{cl}$ is the response to a unit regular VSWF of index $\nu$ at the origin.
+Column $u$ of $\mathbf{T}^\mathrm{cl}$ is the response to a unit regular VSWF of index $u$ at the origin.
 The mode is translated to each sphere by the regular translation matrix $\mathbf{J}_{i0}$,
 \begin{equation}
-  \bm{p}_\nu^{(i)} = \mathbf{J}_{i0}\,\bm{e}_\nu,
+  \bm{p}_u^{(i)} = \mathbf{J}_{i0}\,\bm{e}_u,
   \label{eq:cluster-rhs}
 \end{equation}
-where $\bm{e}_\nu$ is the unit vector of mode $\nu$.
+where $\bm{e}_u$ is the unit vector of mode $u$.
 The interaction equation~\eqref{eq:global-system} is solved with this right-hand side, and the solution is merged to the origin by Eq.~\eqref{eq:common-origin}:
 \begin{equation}
-  \mathbf{T}^\mathrm{cl}\,\bm{e}_\nu = \sum_{i=1}^{N_S} \mathbf{J}_{0i}\,\bm{a}_\nu^{(i)}.
+  \mathbf{T}^\mathrm{cl}\,\bm{e}_u = \sum_{i=1}^{N_S} \mathbf{J}_{0i}\,\bm{a}_u^{(i)}.
   \label{eq:cluster-column}
 \end{equation}
-All $K$ right-hand sides share the operator $\mathbf{I} - \mathbf{T}\mathbf{A}$.
+All $N_\mathrm{cl}$ right-hand sides share the operator $\mathbf{I} - \mathbf{T}\mathbf{A}$.
 The present implementation uses the direct translation operator for these solves, not the FFT operator.
 
 \subsection{Rotation of the expansion coefficients}
+\label{sec:wigner-rotation}
 
 The orientation of the particle is given by the intrinsic ZYZ Euler angles $\Omega = (\alpha, \beta, \gamma)$.
 A rotation mixes VSWFs of the same order $n$ only, and it acts in the same way on the two polarisation blocks.
@@ -1013,8 +1385,8 @@ where $\bm{p}_{0,z}$ holds the plane-wave coefficients of Sec.~\ref{sec:incident
 They carry the phase factor $e^{i z_0}$, where $z_0$ is the dimensionless $z$ coordinate of $\bm{r}_0$.
 The phase reference is then the laboratory plane $z = 0$, as in the fixed-orientation solution.
 Equation~\eqref{eq:cluster-orientation} is evaluated from right to left as two rotations of a vector and one product of a matrix and a vector.
-The cost per orientation is $O(K^2)$.
-The forward amplitudes $S_1$ to $S_4$ follow from $\bm{a}_0(\Omega)$ by Eq.~\eqref{eq:mode-transform} and the amplitude sums of Sec.~\ref{sec:output}.
+The cost per orientation is $O(N_\mathrm{cl}^2)$.
+The forward amplitudes $S_1$ to $S_4$ follow from $\bm{a}_0(\Omega)$ by Eq.~\eqref{eq:mode-transform} and Eq.~\eqref{eq:amplitude-sum}.
 $\Omega = (0, 0, 0)$ reproduces the fixed-orientation result.
 
 The implementation was checked in two ways.
@@ -1023,31 +1395,183 @@ At other orientations they agree with the direct solution for the geometry rotat
 The present functions return the forward amplitudes only.
 
 %% ============================================================
-\section{Computational Flow Summary}
+\section{Validation against the Fortran Reference}
+\label{sec:validation}
+
+\subsection{Test cases with equal spheres}
+\label{sec:validation-equal}
+
+The package was compared with the three test cases of the Fortran code MSTM v4.0 in the version modified for CAS (\texttt{MSTM-v4.0\_for\_CAS}).
+The reference values are those printed by the Fortran code, with four significant digits for the amplitudes and five for the efficiencies.
+The printed amplitudes of magnitude 2.7 and 320 therefore fix the comparison to about \num{2e-4}.
+All calculations use $\varepsilon = 10^{-6}$ and the single-sphere truncation order of Eq.~\eqref{eq:nstop}.
+\begin{itemize}[nosep]
+  \item \textbf{Test case 1}: two touching spheres on the $x$ axis, $x_i = 1.507$, $m_\mathrm{rel} = 1.58 + 0.05i$, order 5.
+  \item \textbf{Test case 2}: 1000 spheres placed at random in a cylinder, $x_i = 1$, $m_\mathrm{rel} = 1.6 + 0.0123i$, order 4, direct translation.
+  \item \textbf{Test case 3}: the same aggregate with the FFT translation of Sec.~\ref{sec:fft-translation}.
+\end{itemize}
+The package needs the same number of iterations as the Fortran code in all three cases (3, 18 and 18).
+
+\begin{table}[htbp]
+\caption{Relative difference between the package (v1.2.0) and the printed Fortran output. For the amplitudes it is the largest value of $|S^\mathrm{Julia} - S^\mathrm{Fortran}| / |S^\mathrm{Fortran}|$ over the elements named. In test case 1 the elements $S_3$, $S_4$ vanish.}
+\label{tab:validation}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} lccc @{}}
+\toprule
+Quantity & Test case 1 & Test case 2 & Test case 3 (FFT) \\
+\midrule
+Forward $S_1$, $S_2$   & \num{1.9e-4} & \num{2.1e-4} & \num{2.4e-4} \\
+Forward $S_3$, $S_4$   & --           & \num{3.0e-3} & \num{4.1e-2} \\
+Backward $S_1$, $S_2$  & \num{5.7e-5} & \num{2.3e-4} & \num{1.5e-2} \\
+Backward $S_3$, $S_4$  & --           & \num{4.1e-5} & \num{2.8e-1} \\
+$Q_\mathrm{ext}$       & \num{8.1e-6} & \num{2.5e-5} & \num{1.3e-5} \\
+$Q_\mathrm{sca}$       & \num{1.5e-4} & \num{1.3e-5} & \num{5.6e-4} \\
+$Q_\mathrm{abs}$       & \num{5.0e-4} & \num{1.4e-4} & \num{1.6e-2} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:validation} gives the differences.
+With direct translation the forward and backward amplitudes $S_1$, $S_2$ and the extinction efficiency agree with the Fortran output to the printed precision.
+Three entries of the first two test cases are larger than the printed precision.
+\begin{itemize}[nosep]
+  \item The forward elements $S_3$, $S_4$ of test case 2 differ by \num{3e-3}.
+  They are about 180 times smaller than $S_1$, $S_2$, and their difference is \num{2e-5} of $|S_1|$.
+  This is below the error that the tolerance $\varepsilon = 10^{-6}$ leaves in either code.
+  \item $Q_\mathrm{sca}$ of test case 1 differs by \num{1.5e-4}.
+  Section~\ref{sec:validation-unequal} traces differences of this kind to the solver tolerance.
+  \item $Q_\mathrm{abs}$ of test case 1 differs by \num{5.0e-4}.
+  The package obtains it as $Q_\mathrm{ext} - Q_\mathrm{sca}$ (Eq.~\eqref{eq:qabs}), so the difference of $Q_\mathrm{sca}$ appears enlarged by the ratio $Q_\mathrm{sca}/Q_\mathrm{abs} = 3.6$.
+\end{itemize}
+
+Test case 3 compares two implementations of an approximation.
+The forward amplitudes $S_1$, $S_2$ and $Q_\mathrm{ext}$ again agree to the printed precision.
+The other quantities differ at the level of the error of the FFT translation itself.
+In the package the FFT result differs from the direct result by \num{7.7e-4} in the forward $S_1$, $S_2$, by \num{2.2e-4} in $Q_\mathrm{ext}$ and by \num{2.7e-2} in the backward $S_1$.
+In the Fortran output the corresponding differences are \num{6e-4}, \num{2e-4} and \num{2.6e-2}.
+The backward elements $S_3$, $S_4$ are not resolved by the FFT translation in either code for this aggregate.
+The difference in $Q_\mathrm{abs}$ has the cause named above: the spheres absorb weakly, $Q_\mathrm{sca}/Q_\mathrm{abs} = 30$, and the error of the FFT translation in $Q_\mathrm{sca}$ (\num{7.6e-4} in the package) is enlarged by this ratio.
+The Fortran value of $Q_\mathrm{abs}$ changes by only \num{5.5e-4} between the two translations, so the Fortran code does not obtain it from this difference.
+The absorption efficiency of weakly absorbing aggregates should therefore be taken from a calculation with direct translation.
+
+\subsection{Aggregates with unequal radii}
+\label{sec:validation-unequal}
+
+The spheres of the three test cases have equal radii.
+The package was therefore also compared with the Fortran code for fractal aggregates whose monomer radii differ.
+The radii have a relative standard deviation of 0.08 to 0.10, and the size parameters lie between 0.21 and 0.32 (wavelength \SI{632.8}{\nano\meter} in water).
+Both codes use direct translation, $\varepsilon = 10^{-6}$ and the single-sphere truncation order.
+The Fortran code was run anew for these cases.
+
+\begin{table}[htbp]
+\caption{Relative difference between the package and the Fortran output for aggregates with unequal monomer radii, direct translation in both codes, $\varepsilon = 10^{-6}$. The amplitude columns give the larger of the differences of $S_1$ and $S_2$.}
+\label{tab:validation-unequal}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} rclccccc @{}}
+\toprule
+$N_S$ & $D_f$ & $m_\mathrm{rel}$ & Forward & Backward & $Q_\mathrm{ext}$ & $Q_\mathrm{abs}$ & $Q_\mathrm{sca}$ \\
+\midrule
+ 20 & 2.35 & $1.95 + 0.79i$   & \num{2.5e-4} & \num{7.1e-5} & \num{3.6e-5} & \num{8.9e-5} & \num{5.5e-4} \\
+ 20 & 2.35 & $1.60 + 0.0123i$ & \num{1.3e-4} & \num{8.2e-5} & \num{2.8e-6} & \num{1.1e-3} & \num{4.5e-4} \\
+100 & 2.35 & $1.95 + 0.79i$   & \num{1.8e-5} & \num{6.6e-5} & \num{1.1e-5} & \num{2.2e-4} & \num{6.7e-4} \\
+100 & 2.35 & $1.60 + 0.0123i$ & \num{6.9e-5} & \num{5.0e-5} & \num{1.6e-5} & \num{4.0e-5} & \num{1.2e-5} \\
+317 & 2.35 & $1.95 + 0.79i$   & \num{2.3e-4} & \num{2.9e-4} & \num{1.1e-5} & \num{7.7e-6} & \num{4.6e-5} \\
+317 & 2.35 & $1.60 + 0.0123i$ & \num{1.8e-4} & \num{1.6e-4} & \num{6.8e-6} & \num{5.6e-4} & \num{7.2e-5} \\
+317 & 2.95 & $1.95 + 0.79i$   & \num{1.7e-4} & \num{1.2e-4} & \num{5.9e-6} & \num{2.0e-4} & \num{2.7e-4} \\
+317 & 2.95 & $1.60 + 0.0123i$ & \num{1.6e-4} & \num{1.5e-4} & \num{1.9e-6} & \num{1.4e-3} & \num{9.2e-5} \\
+504 & 2.35 & $1.95 + 0.79i$   & \num{1.1e-4} & \num{4.8e-5} & \num{3.9e-6} & \num{5.6e-5} & \num{8.4e-5} \\
+504 & 2.35 & $1.60 + 0.0123i$ & \num{1.3e-4} & \num{1.3e-4} & \num{2.0e-6} & \num{2.8e-3} & \num{3.0e-4} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:validation-unequal} gives the differences for ten cases.
+The largest truncation order and the number of iterations are the same in the two codes in every case.
+The amplitudes $S_1$, $S_2$ in the forward and backward directions and $Q_\mathrm{ext}$ agree to the printed precision of the Fortran output.
+The differences of $S_3$, $S_4$ are at most \num{2e-5} of $|S_1|$ in the forward direction and \num{1.2e-4} in the backward direction.
+
+A second comparison uses 346 earlier Fortran outputs for the aggregate of 20 monomers over a grid of absorbing refractive indices ($1.02 \leq \mathrm{Re}\,m \leq 2.21$, $0.07 \leq \mathrm{Im}\,m \leq 1.40$).
+With direct translation the package differs from them by at most \num{4.4e-4} in the forward $S_1$, $S_2$, by at most \num{3.1e-4} in the backward $S_1$, $S_2$ and by at most \num{4.7e-5} in $Q_\mathrm{ext}$.
+The medians are \num{1.7e-4}, \num{6.7e-5} and \num{9.2e-6}.
+The truncation orders agree in all 346 cases, and the numbers of iterations differ by one at most.
+These Fortran runs used the FFT option.
+They nevertheless agree with the direct translation of the package to the printed precision.
+The FFT translation of the package differs from them by up to \num{1.7e-3} in the forward and \num{6.7e-3} in the backward $S_1$, $S_2$.
+This is the error of the FFT translation of the package for an aggregate of 20 monomers.
+
+\paragraph{Efficiencies and the tolerance.}
+The entries for $Q_\mathrm{abs}$ and $Q_\mathrm{sca}$ in Table~\ref{tab:validation-unequal} are larger than the printed precision in several rows.
+In the grid of 346 refractive indices the largest differences are \num{4.3e-3} in $Q_\mathrm{abs}$ (at $m = 2.21 + 0.07i$) and \num{1.6e-2} in $Q_\mathrm{sca}$ (at $m = 1.02 + 0.07i$).
+In each case the affected efficiency is the smaller of the two.
+These differences come from the solver tolerance and not from the treatment of unequal radii.
+With $\varepsilon = 10^{-12}$ in both codes they fall to the printed precision (Table~\ref{tab:validation-tolerance}).
+The two codes obtain the smaller efficiency in different ways, and an unconverged solution affects the two ways differently.
+The package forms $Q_\mathrm{abs} = Q_\mathrm{ext} - Q_\mathrm{sca}$, so $Q_\mathrm{abs}$ carries the absolute error of $Q_\mathrm{ext}$.
+For the aggregate of 504 monomers with $m = 1.60 + 0.0123i$ the default tolerance leaves an error of \num{3.7e-4} in $Q_\mathrm{ext}$ in both codes.
+It leaves \num{3.0e-3} in $Q_\mathrm{abs}$ of the package and \num{1.3e-4} in $Q_\mathrm{abs}$ of the Fortran code.
+A smaller $\varepsilon$ should be used when the absorption of a weakly absorbing aggregate is needed to better than a percent.
+
+\begin{table}[htbp]
+\caption{Relative difference between the package and the Fortran output for two tolerances of the solver, direct translation.}
+\label{tab:validation-tolerance}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} rlcccccc @{}}
+\toprule
+ & & \multicolumn{3}{c}{$\varepsilon = 10^{-6}$} & \multicolumn{3}{c}{$\varepsilon = 10^{-12}$} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-8}
+$N_S$ & $m_\mathrm{rel}$ & $Q_\mathrm{ext}$ & $Q_\mathrm{abs}$ & $Q_\mathrm{sca}$ & $Q_\mathrm{ext}$ & $Q_\mathrm{abs}$ & $Q_\mathrm{sca}$ \\
+\midrule
+504 & $1.60 + 0.0123i$ & \num{2.0e-6} & \num{2.8e-3} & \num{3.0e-4} & \num{4.6e-6} & \num{3.8e-6} & \num{9.5e-6} \\
+ 20 & $2.21 + 0.07i$   & \num{8.1e-6} & \num{4.3e-3} & \num{2.4e-3} & \num{5.5e-6} & \num{4.8e-6} & \num{2.5e-5} \\
+ 20 & $1.02 + 0.07i$   & \num{1.1e-5} & \num{1.3e-4} & \num{1.6e-2} & \num{3.9e-5} & \num{2.4e-5} & \num{2.0e-6} \\
+ 20 & $1.95 + 0.79i$   & \num{3.6e-5} & \num{8.9e-5} & \num{5.5e-4} & \num{3.0e-5} & \num{3.2e-6} & \num{3.1e-5} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The same cause explains the entries for $Q_\mathrm{sca}$ and $Q_\mathrm{abs}$ of test case 1 in Table~\ref{tab:validation}.
+With $\varepsilon = 10^{-12}$ both codes give $Q_\mathrm{abs}$ = 0.31855 and $Q_\mathrm{sca}$ = 1.1522 for that case.
+
+\subsection{Other checks}
+
+The cluster T-matrix was checked against the direct solution as described in Sec.~\ref{sec:cluster-tmatrix}, and the shared basis against CBICG solutions with $\varepsilon = 10^{-14}$ as described in Sec.~\ref{sec:shared-basis}.
+Four of the cases with unequal radii are kept as a regression test with Fortran values for $\varepsilon = 10^{-12}$ (\texttt{test/test\_fortran\_unequal\_radii.jl}).
+The other unit tests of the package (\texttt{test/}) cover the Mie coefficients, the FFT translation, the truncation order, the Wigner rotation, the cluster T-matrix, the shared basis, the parameter sweep and the GPU solver.
+
+%% ============================================================
+\section{Computational Flow and Implementation Mapping}
 \label{sec:flow}
+
+The first table lists the steps of a calculation in their order.
+The second table maps the equations of this note to the functions of the package.
 
 \begin{center}
 \footnotesize
-\begin{tabular}{@{} rlll @{}}
+\begin{tabular}{@{} r >{\raggedright\arraybackslash}p{3.0cm} >{\raggedright\arraybackslash}p{7.6cm} >{\raggedright\arraybackslash}p{4.2cm} @{}}
   \toprule
   Step & Operation & Description & Source file \\
   \midrule
   1 & Non-dimensionalise & $x_i = k \cdot a_i$, $\bm{r}_i \to k \cdot \bm{r}_i$, $m_\mathrm{rel} = m_\mathrm{sphere}/n_\mathrm{med}$ & \texttt{ParameterSweep.jl} \\
-  2 & Mie coefficients & $a_n, b_n$ for each sphere & \texttt{MieCoefficients.jl} \\
-  3 & Build T-matrix & lr\_tran basis, per sphere & \texttt{TMatrixSolver.jl} \\
-  4 & Incident field & $\bm{p}_\mathrm{inc}$ ($m = \pm 1$ terms) & \texttt{TMatrixSolver.jl} \\
-  5 & CBICG solve & $(\mathbf{I} - \mathbf{T}\mathbf{A})\bm{x} = \mathbf{T}\bm{p}_\mathrm{inc}$; warm-start from previous $m$ (\S\ref{sec:continuation}) & \texttt{TMatrixSolver.jl} \\
-  5' & Shared basis (optional) & all $m$ of an aggregate in one Krylov basis (\S\ref{sec:shared-basis}) & \texttt{SharedBasisSweep.jl} \\
-  6 & Common origin & Translate coefficients & \texttt{ScatteringAmplitude.jl} \\
-  7 & Amplitudes & $S_1$--$S_4$ at $\theta = 0^\circ, 180^\circ$ & \texttt{ScatteringAmplitude.jl} \\
-  8 & Efficiencies & $Q_\mathrm{ext}$, $Q_\mathrm{sca}$, $Q_\mathrm{abs}$ & \texttt{ScatteringAmplitude.jl} \\
-  9 & MI02 \& CAS & Convert amplitudes & \texttt{ParameterSweep.jl} \\
+  2 & Mie coefficients & $a_n, b_n$ for each sphere (\S\ref{sec:mie}) & \texttt{MieCoefficients.jl} \\
+  3 & Truncation order & single-sphere order; optional contact order (\S\ref{sec:contact-order}) & \texttt{TruncationOrder.jl} \\
+  4 & T-matrix & lr\_tran basis, per sphere (\S\ref{sec:mie}) & \texttt{TMatrixSolver.jl} \\
+  5 & Incident field & $\bm{p}_\mathrm{inc}$, degrees $m = \pm 1$ (\S\ref{sec:incident}) & \texttt{TMatrixSolver.jl} \\
+  6 & Translation operator & direct (\S\ref{sec:translation}) or FFT grid with an optional far order (\S\ref{sec:fft-translation}) & \texttt{TranslationCoefs.jl}, \texttt{FFTTranslation.jl} \\
+  7 & Solve & CBICG for $(\mathbf{I} - \mathbf{T}\mathbf{A})\bm{x} = \mathbf{T}\bm{p}_\mathrm{inc}$, started from the solution of the previous $m$ (\S\ref{sec:continuation}); optional GMRES or GPU batches (\S\ref{sec:gpu}) & \texttt{TMatrixSolver.jl}, \texttt{ext/} \\
+  7' & Shared basis (optional) & all $m$ of an aggregate in one Krylov basis (\S\ref{sec:shared-basis}), in place of step 7 & \texttt{SharedBasisSweep.jl} \\
+  8 & Common origin & translate the coefficients (\S\ref{sec:common-origin}) & \texttt{ScatteringAmplitude.jl} \\
+  9 & Amplitudes & $S_1$--$S_4$ at $\theta = 0^\circ, 180^\circ$ & \texttt{ScatteringAmplitude.jl} \\
+  10 & Efficiencies & $Q_\mathrm{ext}$, $Q_\mathrm{sca}$, $Q_\mathrm{abs}$ & \texttt{ScatteringAmplitude.jl} \\
+  11 & MI02 \& CAS & convert the amplitudes & \texttt{ParameterSweep.jl} \\
+  \midrule
+  -- & Many orientations (optional) & cluster T-matrix once, then a Wigner rotation per orientation (\S\ref{sec:cluster-tmatrix}); replaces steps 5 to 9 & \texttt{ClusterTMatrix.jl}, \texttt{WignerRotation.jl} \\
   \bottomrule
 \end{tabular}
 \end{center}
 
-%% ============================================================
-\section{Implementation Mapping}
 \label{sec:mapping}
 
 \begin{center}
@@ -1060,8 +1584,8 @@ The present functions return the forward amplitudes only.
   \midrule
   Wavenumber, non-dim. & \eqref{eq:wavenumber}--\eqref{eq:a-eff} & \texttt{compute\_scattering}, \texttt{run\_parameter\_sweep} & \texttt{ScatteringAmplitude.jl}, \texttt{ParameterSweep.jl} \\
   Mie coefficients $a_n, b_n$ & \eqref{eq:mie-an}--\eqref{eq:nstop} & \texttt{compute\_mie\_coefficients} & \texttt{MieCoefficients.jl} \\
-  lr\_tran T-matrix & \eqref{eq:tmatrix-lr} & \texttt{\_precompute\_T\_values}, \texttt{\_apply\_T!} & \texttt{TMatrixSolver.jl} \\
-  Translation $\mathbf{H}_{ij}$ & \eqref{eq:axial-translation}--\eqref{eq:lr-translation} & \texttt{compute\_translation\_matrix} & \texttt{TranslationCoefs.jl} \\
+  lr\_tran T-matrix & \eqref{eq:tmatrix-lr}--\eqref{eq:tmatrix-inverse} & \texttt{\_precompute\_T\_values}, \texttt{\_apply\_T!} & \texttt{TMatrixSolver.jl} \\
+  Translation $\mathbf{H}_{ij}$ & \eqref{eq:addition-theorem}, \eqref{eq:translation-sum}--\eqref{eq:lr-translation} & \texttt{compute\_translation\_matrix} & \texttt{TranslationCoefs.jl} \\
   FFT translation & \eqref{eq:fft-convolution} & \texttt{apply\_A\_fft!}, \texttt{init\_fft\_grid} & \texttt{FFTTranslation.jl} \\
   CBICG solver & \eqref{eq:global-system}, \eqref{eq:adjoint-symmetry}, Table~\ref{tab:cbicg} & \texttt{\_solve\_bicg} & \texttt{TMatrixSolver.jl} \\
   GMRES solver (optional) & \eqref{eq:global-system}, \eqref{eq:krylov-subspace}, Table~\ref{tab:gmres} & \texttt{gmres} (Krylov.jl) & \texttt{TMatrixSolver.jl} \\
@@ -1098,19 +1622,19 @@ The present functions return the forward amplitudes only.
   \item Frommer, A.\ \& Gl\"assner, U.\ (1998). Restarted GMRES for shifted linear systems. \textit{SIAM J.\ Sci.\ Comput.}, 19(1), 15--26.
   \item Mackowski, D.W.\ (1991). Analysis of radiative scattering for multiple sphere configurations. \textit{Proc.\ R.\ Soc.\ Lond.\ A}, 433, 599--614.
   \item Mackowski, D.W.\ (1994). Calculation of total cross sections of multiple-sphere clusters. \textit{JOSA A}, 11(11), 2851--2861.
-  \item Mackowski, D.W.\ (1996). Calculation of the total scattering cross section and the total absorbed energy for the multiple sphere clusters. \textit{JOSA A}, 13(11), 2266--2278.
   \item Mackowski, D.W.\ (2014). A general superposition solution for electromagnetic scattering by multiple spherical domains of optically active media. \textit{JQSRT}, 133, 264--270.
-  \item Mackowski, D.W.\ \& Kolokolova, L.\ (2022). Application of the multiple sphere superposition solution to large-scale systems of spheres via an accelerated algorithm. \textit{JQSRT}, 280, 108075.
+  \item Mackowski, D.W.\ \& Kolokolova, L.\ (2022). Application of the multiple sphere superposition solution to large-scale systems of spheres via an accelerated algorithm. \textit{JQSRT}, 287, 108221.
+  \item Mackowski, D.W.\ \& Mishchenko, M.I.\ (1996). Calculation of the T matrix and the scattering matrix for ensembles of spheres. \textit{JOSA A}, 13(11), 2266--2278.
   \item Mackowski, D.W.\ \& Mishchenko, M.I.\ (2011). A multiple sphere T-matrix Fortran code for use on parallel computer clusters. \textit{JQSRT}, 112(13), 2182--2192.
   \item Mishchenko, M.I., Travis, L.D.\ \& Lacis, A.A.\ (2002). \textit{Scattering, Absorption, and Emission of Light by Small Particles}. Cambridge University Press. [MI02]
-  \item Moteki, N.\ \& Adachi, K.\ (2024). CAS-v2 protocol. \textit{Optics Express}, 32(21), 36500--36522.
+  \item Moteki, N.\ \& Adachi, K.\ (2024). Measuring the polarized complex forward-scattering amplitudes of single particles in unbounded fluid flow: CAS-v2 protocol. \textit{Optics Express}, 32(21), 36500--36522.
   \item Saad, Y.\ \& Schultz, M.H.\ (1986). GMRES: A generalized minimal residual algorithm for solving nonsymmetric linear systems. \textit{SIAM J.\ Sci.\ Stat.\ Comput.}, 7(3), 856--869.
   \item Wiscombe, W.J.\ (1980). Improved Mie scattering algorithms. \textit{Applied Optics}, 19(9), 1505--1509.
   \item Xu, Y.-l.\ (1996). Calculation of the addition coefficients in electromagnetic multisphere-scattering theory. \textit{J.\ Comput.\ Phys.}, 127(2), 285--298.
 \end{enumerate}
 
-\bigskip
-\noindent\textbf{Acknowledgment.}\quad
-This document was prepared with the assistance of Claude (Anthropic). The author assumes full responsibility for the content.
+\section*{Acknowledgment}
+This document was prepared with the assistance of Claude (Anthropic).
+The author assumes full responsibility for the content.
 
 \end{document}
