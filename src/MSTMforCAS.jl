@@ -67,8 +67,9 @@ Holds the scattering computation output for a single (aggregate, refractive inde
 - `S_forward::NTuple{4, ComplexF64}`: S₁, S₂, S₃, S₄ at θ=0° (BH83 convention)
 - `S_backward::NTuple{4, ComplexF64}`: S₁, S₂, S₃, S₄ at θ=180° (BH83 convention)
 - `Q_ext::Float64`: Polarization-averaged extinction efficiency (dimensionless)
-- `Q_abs::Float64`: Polarization-averaged absorption efficiency (dimensionless)
-- `Q_sca::Float64`: Polarization-averaged scattering efficiency (= Q_ext - Q_abs)
+- `Q_abs::Float64`: Polarization-averaged absorption efficiency (= Q_ext - Q_sca)
+- `Q_sca::Float64`: Polarization-averaged scattering efficiency, from the expansion about the
+  common origin (dimensionless)
 - `converged::Bool`: Whether the T-matrix iteration converged
 - `n_iterations::Int`: Number of iterations used
 - `truncation_order::Int`: Maximum VSWF truncation order used across all spheres
