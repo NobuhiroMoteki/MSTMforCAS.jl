@@ -92,8 +92,8 @@ end
 # ─────────────────────────────────────────────────────────────
 # T-matrix application: out = T * inp
 #
-# In the lr_tran basis, for a homogeneous sphere with Mie coefficients a_n (TE)
-# and b_n (TM), the T-matrix is a full 2×2 matrix per multipole order n:
+# In the lr_tran basis, for a homogeneous sphere with Mie coefficients a_n (TM,
+# electric type) and b_n (TE, magnetic type), the T-matrix is a full 2×2 matrix per multipole order n:
 #
 #   T_n = [ -(a_n+b_n)/2   -(a_n-b_n)/2 ]
 #         [ -(a_n-b_n)/2   -(a_n+b_n)/2 ]
