@@ -25,12 +25,28 @@ No result of an uninterrupted sweep changes. One case of a resumed GPU sweep cha
   before, so every installation downloaded it. A CPU-only installation no longer needs it.
   To use the GPU solver, install CUDA.jl in the default environment
   (`julia -e 'using Pkg; Pkg.add("CUDA")'`). Do not add it with `--project=.`.
+- The GPU extension works with CUDA.jl 5 and 6 (`[compat]` `CUDA = "5, 6"`, tested with 5.11.0
+  and 6.5.1). It used a function that CUDA.jl 6 removed. The extension checks the version when
+  it loads and, for another major version, issues a warning and leaves the GPU solver off.
 - GPU path: the truncation order of an (aggregate, medium condition) group now comes from the
   whole refractive index grid. Before, it came from the refractive indices that remained in the
   run. A sweep with `truncation_eps` that was interrupted and resumed could therefore compute
   the remaining rows at a lower order than an uninterrupted sweep (in a test, order 3 against
   7 and a difference of 0.8 % in `Q_ext`). Rows of uninterrupted sweeps do not change.
 - `gpu_float32 = true` without `use_gpu = true` now issues a warning. It had and has no effect.
+
+### Fixed
+
+- `run_parameter_sweep` could lose rows at the very end of a sweep. Rows wait in a buffer and are
+  written at intervals, at the end of a group and when the last job is counted. When several
+  threads finished at almost the same time, the thread that counted the last job could write
+  the buffer before another thread had stored its row, and nothing wrote that row afterwards.
+  The sweep now writes the buffer once more after all threads have ended. The values of the
+  rows that were written are not affected. The loss was seen on the GPU path, where the results
+  of a batch are recorded by several threads (1 of 24 small test sweeps lost one row). It can
+  also occur in a multi-threaded CPU sweep. To check an existing file, compare its number of
+  rows with the number of jobs. Running the same sweep again with the same output file computes
+  the missing rows.
 
 ### Added
 

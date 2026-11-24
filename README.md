@@ -90,7 +90,16 @@ To use the GPU solver you need an NVIDIA GPU with its driver, and CUDA.jl in an 
 julia -e 'using Pkg; Pkg.add("CUDA")'
 ```
 
-Do not run `Pkg.add("CUDA")` with `--project=.`. That would move CUDA.jl into the dependencies of `Project.toml`, and every CPU-only installation would then download it.
+The GPU code is tested with CUDA.jl 5 (5.11.0) and 6 (6.5.1). For another major version the package issues a warning when CUDA.jl is loaded, and sweeps run on the CPU.
+
+Julia does not check that the CUDA.jl of the default environment fits the packages of the project. A mismatch shows up as an error from the CUDA extension of another package when CUDA.jl is loaded (for example `LinearOperatorsCUDAExt` with a recent LinearOperators.jl and CUDA.jl 5). Bring both environments up to date in that case:
+
+```bash
+julia -e 'using Pkg; Pkg.update()'
+julia --project=. -e 'using Pkg; Pkg.update()'
+```
+
+Do not run this command with `--project=.`. That would move CUDA.jl into the dependencies of `Project.toml`, and every CPU-only installation would then download it.
 
 Verify GPU detection and that the extension loads:
 

@@ -852,6 +852,15 @@ function run_parameter_sweep(
             _sweep_body!(gidx)
         end
     end
+    # Rows that were recorded after the last flush. Several threads can finish at almost the
+    # same time, and the thread that sees `done == n_jobs` can reach the lock before another
+    # thread has stored its row. Without this flush such a row would be lost.
+    lock(io_lock) do
+        if output_h5 !== nothing && !isempty(save_buf)
+            _h5_append!(output_h5, save_buf)
+        end
+        empty!(save_buf)
+    end
     println()  # end progress line
     if config.shared_basis
         @info @sprintf("Shared basis: %d of %d rows were solved by the CBICG fallback",

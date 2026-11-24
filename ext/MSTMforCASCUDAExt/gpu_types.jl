@@ -268,7 +268,8 @@ function determine_batch_size(
     n_ri::Int;
     float32::Bool = false
 )::Int
-    available = round(Int, Float64(CUDA.available_memory()) * 0.80)  # 80% safety margin
+    # free_memory exists in CUDA.jl 5 and 6 (available_memory was removed in 6)
+    available = round(Int, Float64(CUDA.free_memory()) * 0.80)  # 80% safety margin
 
     nblk_node = gpu_fft.nblk_node
     nx, ny, nz = gpu_fft.cell_dim

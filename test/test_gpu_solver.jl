@@ -8,7 +8,8 @@ Run with:
   julia --project=. test/test_gpu_solver.jl
 
 CUDA.jl is a weak dependency of the package. It must be loadable in the session, for example
-from the default environment (`julia -e 'using Pkg; Pkg.add("CUDA")'`). `Pkg.test()` does not
+from the default environment (`julia -e 'using Pkg; Pkg.add("CUDA")'`).
+The extension is tested with CUDA.jl 5 and 6. `Pkg.test()` does not
 run this file.
 """
 
