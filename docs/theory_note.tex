@@ -387,7 +387,7 @@ It is never smaller than $N_\mathrm{Mie}$.
 
 In an aggregate calculation every sphere then uses the largest of $N_\mathrm{c}$, its own order from Eq.~\eqref{eq:nstop} and a user-specified order.
 In a parameter sweep $N_\mathrm{c}$ is determined for every refractive index.
-On the GPU path all refractive indices of a batch share the largest order of the batch.
+On the GPU path all refractive indices of an (aggregate, medium condition) group share one order, the largest over the refractive index grid.
 Suggested values are $\epsilon_\mathrm{t} = 10^{-2}$ for routine use and $\epsilon_\mathrm{t} = 10^{-3}$ for precise calculations.
 
 \paragraph{Measured contact orders.}
@@ -744,7 +744,12 @@ Running with \texttt{julia -t auto} activates all three.
 A single-precision mode is available (\texttt{gpu\_float32=true}).
 The Mie coefficients and the right-hand sides are computed in double precision on the CPU, and the iteration runs in single precision on the GPU.
 The tolerance is then relaxed to $10^{-5}$.
-For 1000 spheres over the refractive index range of the CAS sweeps the errors of this mode were dominated by the FFT translation and not by the precision.
+For 1000 equal spheres with $1.55 \leq \mathrm{Re}\,m \leq 2.4$ and $0.15 \leq \mathrm{Im}\,m \leq 1.4$ the errors of this mode against the Fortran code were dominated by the FFT translation and not by the precision.
+
+The GPU path was compared with the CPU path on the same FFT grid for an aggregate of 100 monomers with unequal radii.
+In double precision the two agree to rounding error when the tolerance is small enough, also with a far order of the grid below the sphere order.
+In single precision the amplitudes and the efficiencies agree to about $10^{-3}$, the level of the relaxed tolerance.
+All refractive indices of a group use one truncation order on the GPU, taken from the whole refractive index grid, so a resumed sweep uses the order of an uninterrupted one.
 
 \paragraph{Measured throughput.}
 With v1.1.0 a sweep of \num{2.02e6} jobs took \SI{30}{\hour} on a workstation with one GPU and 24 CPU threads ($N_S = 350$ to 2800 in steps of 50, 13 fractal dimensions with 10 aggregates each, three wavelengths with 90 to 121 refractive indices per aggregate, uniform order 3, single precision).

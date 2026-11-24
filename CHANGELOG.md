@@ -16,10 +16,27 @@ have results from an earlier version. The sections after it list all changes by 
 
 ## Unreleased
 
-Documents and one test. No function and no numerical result changes.
+No result of an uninterrupted sweep changes. One case of a resumed GPU sweep changes (see
+"Changed"). CUDA.jl is no longer installed with the package.
+
+### Changed
+
+- CUDA.jl is a weak dependency (`[weakdeps]` in `Project.toml`). It was a regular dependency
+  before, so every installation downloaded it. A CPU-only installation no longer needs it.
+  To use the GPU solver, install CUDA.jl in the default environment
+  (`julia -e 'using Pkg; Pkg.add("CUDA")'`). Do not add it with `--project=.`.
+- GPU path: the truncation order of an (aggregate, medium condition) group now comes from the
+  whole refractive index grid. Before, it came from the refractive indices that remained in the
+  run. A sweep with `truncation_eps` that was interrupted and resumed could therefore compute
+  the remaining rows at a lower order than an uninterrupted sweep (in a test, order 3 against
+  7 and a difference of 0.8 % in `Q_ext`). Rows of uninterrupted sweeps do not change.
+- `gpu_float32 = true` without `use_gpu = true` now issues a warning. It had and has no effect.
 
 ### Added
 
+- `test/test_gpu_solver.jl` (run separately, needs a GPU): tests of the GPU path against the CPU
+  path for an aggregate of 100 monomers with unequal radii, for a far order of the FFT grid,
+  for Float32, and for the parameter sweep with the hybrid dispatch and a resumed run.
 - `test/test_fortran_unequal_radii.jl`: regression test against the Fortran code for aggregates
   with unequal monomer radii (20 and 100 monomers, two refractive indices, direct translation,
   tolerance 1e-12), with the fixtures `test/fixtures/aggregate_unequal_radii_Np*.ptsa`. The
@@ -54,6 +71,11 @@ Documents and one test. No function and no numerical result changes.
     1.7e-3 in the forward and 6.7e-3 in the backward amplitudes.
 - A comment in `src/TMatrixSolver.jl` named the modes of the Mie coefficients the wrong way
   round. Only the comment changed.
+- README brought in line with the theory note: contents of the note by section, validation
+  (test cases, unequal radii, notes on accuracy), references. The output table and the docstring
+  of `ScatteringResult` said that `Q_sca` is `Q_ext - Q_abs`. The package computes `Q_sca` from
+  the expansion about the common origin and `Q_abs` as `Q_ext - Q_sca`. Only the descriptions
+  changed.
 
 ## 1.2.0 (2026-11-23)
 

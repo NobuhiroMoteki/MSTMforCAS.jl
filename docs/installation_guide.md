@@ -196,11 +196,22 @@ package — `Pkg.test()` already exercises the core code paths.
 
 ## 4. Optional: GPU verification
 
-If you set up a GPU in §1.3 or §2.2, confirm Julia can reach it:
+CUDA.jl is a weak dependency of the package and is not installed by
+`Pkg.instantiate()`. If you set up a GPU in §1.3 or §2.2, install CUDA.jl in
+the default environment (not in the project):
+
+```bash
+julia -e 'using Pkg; Pkg.add("CUDA")'
+```
+
+Do not use `--project=.` for this command. It would add CUDA.jl to the
+dependencies in `Project.toml`.
+
+Then confirm Julia can reach the GPU:
 
 ```bash
 julia --project=. -e '
-  using CUDA
+  using MSTMforCAS, CUDA
   println("functional: ", CUDA.functional())
   println("device:     ", CUDA.name(CUDA.device()))
   println("memory:     ", round(CUDA.totalmem(CUDA.device())/2^30, digits=1), " GiB")
@@ -210,9 +221,10 @@ julia --project=. -e '
 The first invocation triggers `CUDA.jl` to download a matching CUDA
 toolkit (~2 GB). Subsequent runs are instantaneous.
 
-To run a sweep on the GPU, pass `use_gpu=true` (see the README "Usage"
-section). The GPU path is auto-disabled when `CUDA.functional()` is
-`false`, so the same script works on CPU-only machines.
+To run a sweep on the GPU, load CUDA.jl (`using CUDA`) and pass
+`use_gpu=true` (see the README "Usage" section). The scripts load it when
+`--gpu` or `--float32` is given. Without CUDA.jl loaded, `use_gpu=true`
+issues a warning and the sweep runs on the CPU.
 
 ---
 
@@ -247,7 +259,7 @@ julia --project=. -e 'using Pkg; Pkg.build()'
   PowerShell.
 - Ensure no Linux-side NVIDIA driver is installed inside WSL2
   (Windows-only driver is correct).
-- Update `CUDA.jl`: `julia --project=. -e 'using Pkg; Pkg.update("CUDA")'`.
+- Update `CUDA.jl`: `julia -e 'using Pkg; Pkg.update("CUDA")'`.
 - Check the artifact toolkit versus driver version:
 
   ```bash
