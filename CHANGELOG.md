@@ -9,15 +9,18 @@ have results from an earlier version. The sections after it list all changes by 
 
 | Fixed in | Affected versions | What was wrong | Results that change | What to do |
 |---|---|---|---|---|
+| 1.2.1 | 1.1.0 to 1.2.0 | On the GPU path the truncation order of a group came from the refractive indices that remained in the run, not from the whole grid. | Rows of a GPU sweep with `truncation_eps` that were computed after an interruption and a resume. They can have a lower truncation order than the rows before the interruption (in a test order 3 against 7, 0.8 % in `Q_ext`). Uninterrupted sweeps and sweeps without `truncation_eps` are not affected. | Check the column `truncation_order` of such files: within one (aggregate, medium) group it must have one value. Recompute the groups where it has not. |
+| 1.2.1 | all before 1.2.1 | A sweep did not write its row buffer after the last thread had ended. A row that was recorded after the last write was lost. | No value changes. Rows can be missing at the end of a sweep, most likely on the GPU path (one row in 1 of 24 small test sweeps). | Compare the number of rows of a file with the number of jobs. Running the same sweep again with the same output file computes the missing rows. |
 | 1.1.0 | 1.0.1, 0.4.1 to 0.4.5 | The GPU path applied the Mie T-matrix of the first sphere to every sphere in the iteration operator. | All outputs of the GPU path (`use_gpu = true`) for aggregates of unequal spheres. For monomer radii with a relative standard deviation of 0.1, the forward amplitudes of single aggregates were off by about 5 to 20 %. The CPU path and aggregates of equal spheres are not affected. | Recompute the GPU results for aggregates of unequal spheres. In the hybrid mode these are the groups with more monomers than `gpu_np_threshold` (default 500). |
 | 1.1.0 | all before 1.1.0 | The backward amplitude of the OCBS signal had the factor `1/√2` of the printed Eq. (28) of Moteki and Adachi (2024). The corrected equation, given in the erratum to that paper, has `1/2`. | `S_bak` from `scripts/read_results_h5_for_cas.jl` and from the code of the Python technical note. The old value is `√2` times the correct one, with the same phase. | Divide old `S_bak` values by `√2`, or compute `S_bak = (-S11_bwd + S22_bwd) / 2` again. The HDF5 files store `S11_bwd` and `S22_bwd` and need no change. |
 | 0.4.4 | all before 0.4.4 | The regular spherical Bessel function `j_n(z)` in the translation matrix was computed by an unstable upward recurrence. | Forward and backward amplitudes of aggregates of sub-wavelength spheres when the truncation order is well above the size parameter (for example order 8 or more at x ≈ 0.3). The values were too large by orders of magnitude. `Q_ext` and the solver were not affected. | Recompute such cases. Calculations with the automatic truncation order used low orders at small x. |
 | 0.4.2 | all before 0.4.2 | The Riccati–Bessel function `ψ_n(x)` of the Mie coefficients was computed by an unstable upward recurrence for x < 1. | Mie coefficients of high order for sub-wavelength spheres (for example `a_7` at x ≈ 0.3), and the amplitudes computed with a truncation order of 7 or more for such spheres. | Recompute such cases. |
 
-## Unreleased
+## 1.2.1 (2026-11-24)
 
-No result of an uninterrupted sweep changes. One case of a resumed GPU sweep changes (see
-"Changed"). CUDA.jl is no longer installed with the package.
+No result of an uninterrupted sweep changes. One case of a resumed GPU sweep changes, and a
+sweep can no longer lose rows at its end (see the table above). CUDA.jl is no longer installed
+with the package.
 
 ### Changed
 
