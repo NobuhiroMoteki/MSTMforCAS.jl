@@ -93,6 +93,26 @@
             @test run_parameter_sweep([agg], cfg; output_h5 = path) === nothing
         end
 
+        @testset "GPU options without the CUDA extension" begin
+            # CUDA.jl is a weak dependency: a CPU-only installation must not need it.
+            proj = Base.parsed_toml(joinpath(@__DIR__, "..", "Project.toml"))
+            @test !haskey(proj["deps"], "CUDA")
+            @test haskey(proj["weakdeps"], "CUDA")
+            @test proj["extensions"]["MSTMforCASCUDAExt"] == "CUDA"
+
+            # gpu_float32 alone does not select the GPU path
+            @test_logs (:warn, r"gpu_float32 = true has no effect") match_mode = :any run_parameter_sweep(
+                [agg], MSTMforCAS.SweepConfig(; base..., gpu_float32 = true); output_h5 = joinpath(dir, "f32_only.h5"))
+            @test read_cols(joinpath(dir, "f32_only.h5")).s1 == read_cols(joinpath(dir, "mie.h5")).s1
+
+            # use_gpu without the extension falls back to the CPU with a warning
+            if MSTMforCAS._gpu_batch_solve_ref[] === nothing
+                @test_logs (:warn, r"CUDA extension not loaded") match_mode = :any run_parameter_sweep(
+                    [agg], MSTMforCAS.SweepConfig(; base..., use_gpu = true); output_h5 = joinpath(dir, "nogpu.h5"))
+                @test all(read_cols(joinpath(dir, "nogpu.h5")).conv .== 1)
+            end
+        end
+
         @testset "resume refuses a file written with another setting" begin
             @test_throws ErrorException run_parameter_sweep(
                 [agg], MSTMforCAS.SweepConfig(; base..., truncation_eps = 1e-3); output_h5 = joinpath(dir, "mie.h5"))

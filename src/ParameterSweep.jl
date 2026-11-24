@@ -58,8 +58,9 @@ Configuration for a parameter sweep computation.
   chosen for every refractive index by `contact_truncation_order`, a preliminary two-sphere
   calculation that resolves the coupling between touching monomers. Suggested values:
   `1e-2` for routine use, `1e-3` for precise calculations. Each sphere uses the larger of this
-  order, its own Mie order and `truncation_order`. On the GPU path all refractive indices of a
-  batch share the largest order of the batch.
+  order, its own Mie order and `truncation_order`. On the GPU path all refractive indices of an
+  (aggregate, medium condition) group share one order, the largest over the refractive index
+  grid.
 - `fft_far_order::Union{Int,Nothing}`: Multipole order that the FFT grid carries (default
   nothing = all orders of every sphere, the behaviour of earlier versions). An integer `F`
   limits the grid to the order `max(F, Mie order)`, where the Mie order is the largest
@@ -81,9 +82,9 @@ Configuration for a parameter sweep computation.
   together with `use_gpu` or with `solver = :gmres`.
 - `use_gpu::Bool`: Use GPU-accelerated batched solver via CUDA.jl extension (default false).
   Requires `using CUDA` before calling `run_parameter_sweep`. Implies `use_fft=true`.
-- `gpu_float32::Bool`: Use Float32 precision for GPU BiCG iterations (default false).
-  Mie coefficients and post-processing remain Float64. ~32x faster than Float64 on consumer GPUs.
-  Convergence tolerance is automatically relaxed to max(tol, 1e-5) for Float32 mode.
+- `gpu_float32::Bool`: Use Float32 precision for GPU BiCG iterations (default false). It has
+  an effect only together with `use_gpu = true`. Mie coefficients and post-processing remain
+  Float64. Convergence tolerance is automatically relaxed to max(tol, 1e-5) for Float32 mode.
 """
 Base.@kwdef struct SweepConfig
     medium_conditions::Vector{Tuple{Float64,Float64}}
@@ -406,6 +407,8 @@ function run_parameter_sweep(
 
     # ── GPU availability check ────────────────────────────────────────────────
     gpu_active = config.use_gpu && _gpu_batch_solve_ref[] !== nothing
+    config.gpu_float32 && !config.use_gpu && @warn(
+        "gpu_float32 = true has no effect without use_gpu = true. The sweep runs on the CPU in double precision.")
     if config.use_gpu && _gpu_batch_solve_ref[] === nothing
         @warn "use_gpu=true but CUDA extension not loaded. Run `using CUDA` first. Falling back to CPU."
     end
@@ -506,9 +509,10 @@ function run_parameter_sweep(
         for ((ai, mci), mis) in group_list
             wl, n_med = config.medium_conditions[mci]
             xb = _x_bucket(aggregates[ai], 2π * n_med / wl)
-            # The shared basis takes its order from the whole refractive index grid, so
-            # that a resumed sweep uses the same order as an uninterrupted one.
-            for mi in (config.shared_basis ? (1:n_mrel) : mis)
+            # The shared basis and the GPU path take one order per group from the whole
+            # refractive index grid, so that a resumed sweep uses the same order as an
+            # uninterrupted one.
+            for mi in ((config.shared_basis || gpu_active) ? (1:n_mrel) : mis)
                 push!(key_set, (xb, ri_grid[mi] / n_med))
             end
         end
@@ -606,12 +610,14 @@ function run_parameter_sweep(
         # Precompute FFT grid once per (aggregate, medium_condition) group
         # With fft_far_order the grid is also built for a single refractive index, so that
         # a resumed sweep uses the same operator as an uninterrupted one.
-        # Shared basis: one order for the group, from the whole refractive index grid
+        # Shared basis and GPU path: one order for the group, from the whole refractive index
+        # grid and not from the jobs that remain
         use_sb_here = config.shared_basis && agg.n_monomers >= 2
+        use_gpu_here = gpu_active && !force_cpu
         local sb_order::Int = 0
         local sb_mie::Int = 0
         local fft_cache::Union{FFTGridData, Nothing} = nothing
-        if use_sb_here
+        if use_sb_here || (use_gpu_here && agg.n_monomers >= 2)
             positions_sb = agg.positions .* k
             radii_sb     = agg.radii     .* k
             for m_abs in ri_grid, s in 1:length(radii_sb)
@@ -754,7 +760,6 @@ function run_parameter_sweep(
         end  # _record_one!
 
         # ── GPU batch path or CPU path ────────────────────────────────────
-        use_gpu_here = gpu_active && !force_cpu
         if use_gpu_here
             ri_batch = [ri_grid[mi] for mi in mi_list]
             # Callback: record each result as soon as its batch completes
@@ -764,9 +769,15 @@ function run_parameter_sweep(
                 # Force flush on last RI of each group to ensure progress display
                 _record_one!(r, ri_batch[ri_idx]; force_flush=(ri_idx == n_ri_in_group))
             end
-            # The batched solver uses one truncation order for the whole batch.
-            orders_batch = [_order_for(ai, mci, mi) for mi in mi_list]
-            order_gpu = any(isnothing, orders_batch) ? nothing : maximum(orders_batch)
+            # The batched solver uses one truncation order for the whole group: the order
+            # of the whole refractive index grid (sb_order), which the FFT grid above has too.
+            local order_gpu::Union{Int,Nothing}
+            if agg.n_monomers >= 2
+                order_gpu = sb_order
+            else
+                orders_batch = [_order_for(ai, mci, mi) for mi in 1:n_mrel]
+                order_gpu = any(isnothing, orders_batch) ? nothing : maximum(orders_batch)
+            end
             _gpu_batch_solve_ref[](
                 agg, k, ri_batch, n_med, fft_cache,
                 (tol=config.convergence_epsilon, max_iter=config.max_iterations,

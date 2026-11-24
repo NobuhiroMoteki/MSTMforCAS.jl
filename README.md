@@ -12,7 +12,19 @@ Reference implementation: [MSTM-v4.0_for_CAS](https://github.com/NobuhiroMoteki/
 
 **Changes and corrections:** see [CHANGELOG.md](CHANGELOG.md). Its first section lists the corrections that change numerical results, with the affected versions.
 
-For a detailed mathematical formulation of the MSTM theory (VSWF expansion, Mie coefficients, translation addition theorem, multi-sphere interaction equation, CBICG solver, and output quantities), see [docs/theory_note.pdf](docs/theory_note.pdf).
+The theory and the numerical methods are described in [docs/theory_note.pdf](docs/theory_note.pdf). Its sections are:
+
+| Section | Content |
+|---|---|
+| 1 | Problem setup, VSWF expansion, left–right circular basis, table of notation |
+| 2 | Lorenz–Mie coefficients and the T-matrix of a sphere |
+| 3 | Interaction equation, incident coefficients, truncation order for touching spheres, translation matrix, FFT translation |
+| 4 | Solvers: CBICG, GMRES, continuation in the refractive index, GPU batches |
+| 5 | Refractive-index sweep with a shared Krylov basis |
+| 6 | Scattering amplitudes and efficiencies |
+| 7 | Cluster T-matrix and particle orientation |
+| 8 | Validation against the Fortran code |
+| 9 | Computational flow and mapping of the equations to the functions |
 
 ## Physical Scope
 
@@ -70,19 +82,23 @@ julia --project=. -e 'using Pkg; Pkg.test()'
 
 ### GPU support (optional)
 
-GPU acceleration requires an NVIDIA GPU with CUDA driver and the CUDA.jl package:
+The package works without a GPU and without CUDA.jl. CUDA.jl is a weak dependency: `Pkg.instantiate()` does not install it, and the GPU code is a package extension that loads only when CUDA.jl is loaded.
+
+To use the GPU solver you need an NVIDIA GPU with its driver, and CUDA.jl in an environment that Julia can see. Install it in the default environment, not in the project:
 
 ```bash
-julia --project=. -e 'using Pkg; Pkg.add("CUDA")'
+julia -e 'using Pkg; Pkg.add("CUDA")'
 ```
 
-Verify GPU detection:
+Do not run `Pkg.add("CUDA")` with `--project=.`. That would move CUDA.jl into the dependencies of `Project.toml`, and every CPU-only installation would then download it.
+
+Verify GPU detection and that the extension loads:
 
 ```bash
-julia --project=. -e 'using CUDA; println(CUDA.functional()); println(CUDA.name(CUDA.device()))'
+julia --project=. -e 'using MSTMforCAS, CUDA; println(CUDA.functional()); println(CUDA.name(CUDA.device()))'
 ```
 
-CUDA.jl automatically downloads the appropriate CUDA toolkit — no manual CUDA installation is needed. The GPU extension is loaded automatically when `using CUDA` is called after `using MSTMforCAS`.
+CUDA.jl downloads the CUDA toolkit itself, so no manual CUDA installation is needed. The scripts load CUDA.jl when `--gpu` or `--float32` is given. If `use_gpu = true` is set and CUDA.jl is not loaded, the sweep issues a warning and runs on the CPU.
 
 ### Dependencies
 
@@ -115,7 +131,7 @@ All length inputs (positions, radii, wavelength) must be given in **the same phy
 | `fft_near_factor` | `Float64` | Near-pair criterion for `fft_far_order`: center distance at most this factor times the sum of the radii (default `1.5`) | `1.5` |
 | `solver` | `Symbol` | Iterative solver: `:cbicg` (default) or `:gmres` | `:gmres` |
 | `use_gpu` | `Bool` | GPU-accelerated batched solver (default `false`; implies `use_fft=true`) | `true` |
-| `gpu_float32` | `Bool` | Use Float32 for GPU BiCG iterations (default `false`; implies `use_gpu=true`) | `true` |
+| `gpu_float32` | `Bool` | Use Float32 for GPU BiCG iterations (default `false`). It has an effect only together with `use_gpu=true`. The script option `--float32` sets both. | `true` |
 | `gpu_np_threshold` | `Int` | Hybrid mode threshold: groups with Np ≤ this value are processed by CPU threads concurrently with the GPU task (default `500`; set to `0` to disable hybrid and send all groups to GPU) | `500` |
 
 The sweep covers the full Cartesian product: **aggregates × medium_conditions × m_real × m_imag**.
@@ -339,8 +355,8 @@ Same structure as forward with `_bwd` suffix (16 columns total).
 | Column | Type | Unit | Description |
 |--------|------|------|-------------|
 | `Q_ext` | Float64 | dimensionless | Extinction efficiency (unpolarized incidence) |
-| `Q_abs` | Float64 | dimensionless | Absorption efficiency |
-| `Q_sca` | Float64 | dimensionless | Scattering efficiency (= Q_ext − Q_abs) |
+| `Q_abs` | Float64 | dimensionless | Absorption efficiency (= Q_ext − Q_sca, see the note on accuracy under [Validation](#validation)) |
+| `Q_sca` | Float64 | dimensionless | Scattering efficiency (from the expansion about the common origin) |
 | `converged` | Int8 | — | Whether CBICG solver converged (1 = yes, 0 = no) |
 | `n_iterations` | Int | — | Number of CBICG iterations used |
 | `truncation_order` | Int | — | Maximum VSWF truncation order used |
@@ -493,26 +509,48 @@ MSTMforCAS.jl/
 │   ├── installation_guide.md       # Setup on WSL2 and native Linux
 │   ├── design_wigner_d_multiorientation.md  # Design of the cluster T-matrix and orientation path
 │   └── technical_note_use_results_from_python.md  # Python reader guide + code
-└── test/
+└── test/                      # Unit tests, with Fortran reference values for aggregates of unequal spheres
+    └── fixtures/              # Sphere positions of the test aggregates
 ```
 
 ## Validation
 
-Validated against Fortran MSTM-v4.0_for_CAS reference output. All primary quantities agree to < 0.1%.
+The package was compared with the Fortran code MSTM-v4.0_for_CAS. The Fortran output has four significant digits for the amplitudes and five for the efficiencies, so differences of about 2e-4 are at its printed precision. The numbers below are relative differences. Section 8 of the theory note has the details.
 
-| Test case | Spheres | Translation | $Q_\mathrm{ext}$ %err | $Q_\mathrm{abs}$ %err | $Q_\mathrm{sca}$ %err | S₁ fwd %err | S₂ fwd %err | Iterations |
-|-----------|---------|------------|------------|------------|------------|-------------|-------------|------------|
-| testcase1 | 2       | direct     | 0.001%     | 0.050%     | 0.015%     | 0.014%      | 0.001%      | 3          |
-| testcase2 | 1000    | direct     | 0.003%     | 0.017%     | 0.001%     | 0.021%      | 0.016%      | 18         |
-| testcase3 | 1000    | FFT        | 0.001%     | 1.6%       | 0.056%     | 0.024%      | 0.007%      | 18         |
+**Test cases of the Fortran distribution** (equal spheres, default tolerance 1e-6):
 
-Testcase3 uses the same geometry and refractive index as testcase2 but with FFT-accelerated translation. The larger $Q_\mathrm{abs}$ error (1.6%) is expected because $Q_\mathrm{abs} = Q_\mathrm{ext} - Q_\mathrm{sca}$ is a small residual ($Q_\mathrm{abs} \approx 0.37$ vs $Q_\mathrm{ext} \approx 11.2$), amplifying the FFT approximation error. The Fortran FFT reference shows the same effect.
+| Quantity | testcase1 (2 spheres, direct) | testcase2 (1000 spheres, direct) | testcase3 (1000 spheres, FFT) |
+|---|---|---|---|
+| Forward S₁, S₂ | 1.9e-4 | 2.1e-4 | 2.4e-4 |
+| Backward S₁, S₂ | 5.7e-5 | 2.3e-4 | 1.5e-2 |
+| $Q_\mathrm{ext}$ | 8.1e-6 | 2.5e-5 | 1.3e-5 |
+| $Q_\mathrm{sca}$ | 1.5e-4 | 1.3e-5 | 5.6e-4 |
+| $Q_\mathrm{abs}$ | 5.0e-4 | 1.4e-4 | 1.6e-2 |
+| Iterations (package / Fortran) | 3 / 3 | 18 / 18 | 18 / 18 |
 
-Run validation:
+**Aggregates with unequal monomer radii** (relative standard deviation of the radii 0.08 to 0.10, size parameters 0.21 to 0.32, direct translation in both codes):
+
+| Comparison | Forward S₁, S₂ | Backward S₁, S₂ | $Q_\mathrm{ext}$ |
+|---|---|---|---|
+| 10 new Fortran runs, 20 to 504 monomers, m = 1.95+0.79i and 1.60+0.0123i (largest difference) | 2.5e-4 | 2.9e-4 | 3.6e-5 |
+| 346 Fortran outputs, 20 monomers, grid of refractive indices (median / largest) | 1.7e-4 / 4.4e-4 | 6.7e-5 / 3.1e-4 | 9.2e-6 / 4.7e-5 |
+
+The truncation orders and the numbers of iterations are the same in the two codes. With the tolerance 1e-12 in both codes, $Q_\mathrm{abs}$ and $Q_\mathrm{sca}$ also agree to the printed precision.
+
+**Notes on accuracy.**
+
+- **Direct translation**: the amplitudes S₁, S₂ and $Q_\mathrm{ext}$ agree with the Fortran output to its printed precision in all cases.
+- **$Q_\mathrm{abs}$ of weakly absorbing aggregates**: the package computes $Q_\mathrm{abs} = Q_\mathrm{ext} - Q_\mathrm{sca}$, so $Q_\mathrm{abs}$ carries the absolute error of $Q_\mathrm{ext}$. With the default tolerance its relative error reached 3e-3 for an aggregate of 504 monomers with m = 1.60+0.0123i. With FFT translation it reached 1.6e-2 in testcase3. Use a smaller `tol` and direct translation when $Q_\mathrm{abs}$ of such aggregates is needed to better than a percent. For strongly absorbing aggregates such as black carbon the effect is small.
+- **FFT translation**: it is an approximation. In testcase3 it changes the forward S₁, S₂ by 8e-4 and the backward S₁ by 2.7e-2 against direct translation, and the Fortran code shows changes of the same size. For an aggregate of 20 monomers the FFT translation of the package differs from direct translation by up to 1.7e-3 in the forward and 6.7e-3 in the backward amplitudes.
+- **Backward amplitudes of large aggregates**: the default tolerance leaves errors of up to 2 % for 1500 to 2800 monomers (theory note, Sec. 4.2).
+
+Run the three test cases:
 
 ```bash
 julia --project=. scripts/validate_testcases.jl
 ```
+
+The comparison for unequal radii is part of the test suite (`test/test_fortran_unequal_radii.jl`).
 
 ## Performance
 
@@ -558,7 +596,7 @@ This task-level parallelism is far more efficient than parallelizing within a si
 
 The speedup is most significant for large aggregates where the solver requires many iterations. For small aggregates (Np~100, ~4 iterations), the improvement is marginal. The continuation is applied automatically within each (aggregate, medium_condition) group and has zero overhead when not beneficial (dimension mismatch triggers automatic fallback to the default initial guess).
 
-**Snake-path grid traversal** (v0.4.1): The 2-D refractive index grid ($m_\mathrm{real} \times m_\mathrm{imag}$) is traversed in a snake (boustrophedon) pattern — the $m_\mathrm{imag}$ sweep direction alternates on each $m_\mathrm{real}$ row. This keeps consecutive grid points at a uniform step size ($|\Delta m| = 0.05$ for a typical 18×26 grid), eliminating the large jumps ($|\Delta m| \approx 1.25$) at row boundaries that occur with naive raster ordering. This maximizes continuation effectiveness at all grid points.
+**Snake-path grid traversal** (v0.4.1): The 2-D refractive index grid ($m_\mathrm{real} \times m_\mathrm{imag}$) is traversed in a snake (boustrophedon) pattern — the $m_\mathrm{imag}$ sweep direction alternates on each $m_\mathrm{real}$ row. This keeps consecutive grid points at a uniform step size ($|\Delta m| = 0.1$ for a 14×14 grid with $1.65 \leq m_\mathrm{real} \leq 2.95$ and $0.15 \leq m_\mathrm{imag} \leq 1.45$), eliminating the large jumps ($|\Delta m| \approx 1.3$) at row boundaries that occur with naive raster ordering. This maximizes continuation effectiveness at all grid points.
 
 **Progress and crash recovery**: Results are flushed to HDF5 every ~60 seconds with a result snapshot (CAS amplitudes, Q_ext). Remaining time is estimated from the observed job completion rate, displayed in days. If the process is interrupted, restarting with the same output file automatically resumes from where it left off.
 
@@ -606,9 +644,9 @@ The figure shows the error of the basis alone (without the fallback) for the fou
 - The warning of the code uses a narrower range, in which the basis alone gave errors below 2e-4 (forward) and 1e-3 (backward): 1.30 ≤ Re m ≤ 3.00, 0 ≤ Im m ≤ 1.65 and max|m| × (largest monomer size parameter) ≤ 1.6.
 - Metal spheres in point contact have no converged truncation order below 30. With gaps of 5 to 10 % of the sum of the radii the basis needs 100 to more than 250 vectors.
 
-The theory note (`docs/theory_note.pdf`, section "Shared Krylov basis for refractive index sweeps") has the method and the details of these measurements.
+Section 5 of the theory note (`docs/theory_note.pdf`) has the method, the reason why the inverse Mie coefficients are close to affine functions of 1/(m² − 1), the algorithm as a table, and the details of these measurements.
 
-### GPU-accelerated batched solver with hybrid CPU parallelism (v0.4.1)
+### GPU-accelerated batched solver with hybrid CPU parallelism
 
 > **Correction (2026-11-18, released in v1.1.0).** In all earlier versions with a GPU path (the release v1.0.1 of 2026-03-28 and versions 0.4.1 to 0.4.5, up to commit `40da716`) the GPU path applied the Mie T-matrix of the first sphere to every sphere in the iteration operator. Results were correct only for aggregates of equal spheres. For monomer radii with a relative standard deviation of 0.1, the forward amplitudes of single aggregates were off by 5–20 %. The CPU path was not affected. The GPU path now uses the T-matrix of each sphere. Results computed with `use_gpu = true` before this correction for aggregates of unequal spheres should be recomputed. Version numbers: the release v1.0.1 was made on 2026-03-28, and the versions 0.4.1 to 0.4.5 came after it. Version 1.1.0 supersedes all of them.
 
@@ -642,7 +680,7 @@ run_parameter_sweep(aggregates, config; output_h5="results.h5")
 
 **Architecture**: For each (aggregate, medium) group, the GPU solver: (1) uploads shared geometry data (FFT grid, translation matrices) to GPU once, (2) processes all RI values in batches of B simultaneously using batched BiCG CUDA kernels, (3) downloads solutions and post-processes on CPU.
 
-**Post-processing optimisation** (v0.4.1): the common-origin translation matrices $\mathbf{J}_{0i}$ (used to merge per-sphere scattered-field coefficients to a single origin for $Q_\mathrm{sca}$ and S amplitudes) depend only on geometry, not on the refractive index. They are therefore computed once per group and applied to all B RI solutions simultaneously via BLAS GEMM, reducing `compute_translation_matrix` calls from $N \times n_\mathrm{RI}$ to $N$.
+**Post-processing optimisation**: the common-origin translation matrices $\mathbf{J}_{0i}$ (used to merge per-sphere scattered-field coefficients to a single origin for $Q_\mathrm{sca}$ and S amplitudes) depend only on geometry, not on the refractive index. They are therefore computed once per group and applied to all B RI solutions simultaneously via BLAS GEMM, reducing `compute_translation_matrix` calls from $N \times n_\mathrm{RI}$ to $N$.
 
 **Hybrid GPU+CPU dispatch**: With `gpu_np_threshold > 0` (default 500), `run_parameter_sweep` automatically splits groups by monomer count:
 - **GPU task** (separate thread): processes Np > threshold groups sequentially; batch preparation and post-processing are parallelised internally via `Threads.@threads`, so CPU cores contribute to GPU-group throughput even during batch preparation/post-processing.
@@ -650,7 +688,7 @@ run_parameter_sweep(aggregates, config; output_h5="results.h5")
 
 This design eliminates the GPU-idle bottleneck that arises for large-Np groups where CPU batch preparation and post-processing dominate the wall time: without threading, GPU utilisation was measured at ~0% during the CPU phases.
 
-**Float32 precision**: Mie coefficients and RHS are always computed in Float64 on CPU. Only the BiCG iterations run in Float32 on GPU, with convergence tolerance automatically relaxed to $10^{-5}$. Results are upcast to Float64 for post-processing. Validated on Np=1000 across the full CAS RI sweep range ($m_\mathrm{real} \in [1.55, 2.4]$, $m_\mathrm{imag} \in [0.15, 1.4]$):
+**Float32 precision**: Mie coefficients and RHS are always computed in Float64 on CPU. Only the BiCG iterations run in Float32 on GPU, with convergence tolerance automatically relaxed to $10^{-5}$. Results are upcast to Float64 for post-processing. Compared with the Fortran code for 1000 equal spheres over $m_\mathrm{real} \in [1.55, 2.4]$ and $m_\mathrm{imag} \in [0.15, 1.4]$:
 
 | Quantity | GPU-FP64 vs Fortran | GPU-FP32 vs Fortran |
 |---|---|---|
@@ -673,14 +711,11 @@ With v1.1.0, black-carbon sweep of 2.02 million jobs (Np = 350–2800 in steps o
 
 The mean number of iterations per job was 7 to 10 on the GPU. The sweep computed with the earlier versions needed about 16 to 18, because of the error described in the correction note above. Several GPU processes on disjoint parts of the aggregate list (`--part I/N` of `scripts/run_sweep_h5_regen.jl`) use the GPU better than one process, because each process spends part of its time on CPU work.
 
-With v0.4.1, one process:
-
-| Mode | Rate |
-|---|---|
-| GPU only, 1 thread (before hybrid) | ~0.8 jobs/s |
-| GPU+CPU hybrid, `-t auto` 24 threads | ~6 jobs/s |
-
 The bottleneck shifts with Np: for large aggregates (Np≥1000) the threaded batch preparation and post-processing dominate, and GPU utilisation increases significantly with `-t auto`. For small aggregates (Np≤500) CPU-thread parallelism alone is more efficient and runs concurrently with the GPU task.
+
+**Agreement with the CPU path**: with the same FFT grid and a tolerance small enough, the Float64 GPU result equals the CPU result to rounding error. This was checked for an aggregate of 100 monomers with unequal radii, also with a far order of the grid below the sphere order. In Float32 the amplitudes and efficiencies agree with the CPU result to about 1e-3, which is the level of the relaxed tolerance.
+
+**One truncation order per group**: all refractive indices of an (aggregate, medium condition) group use one order on the GPU. It is the largest order over the whole refractive index grid, so a resumed sweep uses the same order as an uninterrupted one.
 
 **Crash recovery**: GPU results are flushed to HDF5 after each batch completes (not after the entire group). Interrupted runs resume correctly.
 
@@ -690,14 +725,30 @@ The bottleneck shifts with Np: for large aggregates (Np≥1000) the threaded bat
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
+This runs the CPU tests. They need no GPU and no CUDA.jl.
+
+The GPU tests are a separate file. They need a functional NVIDIA GPU and CUDA.jl in the default environment (see [GPU support](#gpu-support-optional)), and they skip themselves otherwise:
+
+```bash
+julia --project=. -t 4 test/test_gpu_solver.jl
+```
+
+They compare the GPU path with the CPU path for aggregates with unequal monomer radii, for a far order of the FFT grid, for Float32, and for the parameter sweep with the hybrid dispatch and a resumed run.
+
 ## References
 
+- Argentin, C., Inzhevatkin, K.G. & Yurkin, M.A. (2026). Efficient refractive-index sweeps in the discrete dipole approximation using shifted Krylov methods. arXiv:2611.15909.
 - Bohren, C.F. & Huffman, D.R. (1983). *Absorption and Scattering of Light by Small Particles*. Wiley.
-- Mishchenko, M.I., Travis, L.D. & Lacis, A.A. (2002). *Scattering, Absorption, and Emission of Light by Small Particles*. Cambridge University Press.
-- Mackowski, D.W. (1996). JOSA A, 13(11), 2266-2278.
-- Mackowski, D.W. & Mishchenko, M.I. (2011). JQSRT, 112(13), 2182-2192.
+- Frommer, A. & Glässner, U. (1998). Restarted GMRES for shifted linear systems. SIAM J. Sci. Comput., 19(1), 15-26.
+- Mackowski, D.W. (1994). Calculation of total cross sections of multiple-sphere clusters. JOSA A, 11(11), 2851-2861.
+- Mackowski, D.W. (2014). A general superposition solution for electromagnetic scattering by multiple spherical domains of optically active media. JQSRT, 133, 264-270.
 - Mackowski, D.W. (2014). Direct simulation of scattering and absorption by particle deposits. Proc. ICHMT.
-- Moteki, N. & Adachi, K. (2024). Optics Express, 32(21), 36500-36522.
+- Mackowski, D.W. & Kolokolova, L. (2022). Application of the multiple sphere superposition solution to large-scale systems of spheres via an accelerated algorithm. JQSRT, 287, 108221.
+- Mackowski, D.W. & Mishchenko, M.I. (1996). Calculation of the T matrix and the scattering matrix for ensembles of spheres. JOSA A, 13(11), 2266-2278.
+- Mackowski, D.W. & Mishchenko, M.I. (2011). A multiple sphere T-matrix Fortran code for use on parallel computer clusters. JQSRT, 112(13), 2182-2192.
+- Mishchenko, M.I., Travis, L.D. & Lacis, A.A. (2002). *Scattering, Absorption, and Emission of Light by Small Particles*. Cambridge University Press.
+- Moteki, N. & Adachi, K. (2024). Measuring the polarized complex forward-scattering amplitudes of single particles in unbounded fluid flow: CAS-v2 protocol. Optics Express, 32(21), 36500-36522.
+- Xu, Y.-l. (1996). Calculation of the addition coefficients in electromagnetic multisphere-scattering theory. J. Comput. Phys., 127(2), 285-298.
 
 ## License
 

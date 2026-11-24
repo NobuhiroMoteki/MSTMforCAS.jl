@@ -11,7 +11,7 @@ Run with:
 Options:
   --fft                : use FFT-accelerated translation (faster for N > ~100 spheres)
   --gpu                : use GPU-accelerated batched solver (requires CUDA.jl; implies --fft)
-  --float32            : use Float32 precision for GPU BiCG (implies --gpu; ~32x faster on consumer GPUs)
+  --float32            : use Float32 precision for GPU BiCG (implies --gpu)
   --truncation-order N : override automatic VSWF truncation order
   --truncation-eps EPS : choose the truncation order per refractive index so that the forward
                          amplitudes are converged to relative accuracy EPS with respect to the
