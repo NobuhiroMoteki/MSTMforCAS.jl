@@ -204,7 +204,8 @@ the default environment (not in the project):
 julia -e 'using Pkg; Pkg.add("CUDA")'
 ```
 
-Do not use `--project=.` for this command. It would add CUDA.jl to the
+The GPU code is tested with CUDA.jl 5 (5.11.0) and 6 (6.5.1). Do not use
+`--project=.` for this command. It would add CUDA.jl to the
 dependencies in `Project.toml`.
 
 Then confirm Julia can reach the GPU:
@@ -260,6 +261,11 @@ julia --project=. -e 'using Pkg; Pkg.build()'
 - Ensure no Linux-side NVIDIA driver is installed inside WSL2
   (Windows-only driver is correct).
 - Update `CUDA.jl`: `julia -e 'using Pkg; Pkg.update("CUDA")'`.
+- An error from `LinearOperatorsCUDAExt` (or the CUDA extension of another
+  package) when CUDA.jl is loaded means that the CUDA.jl of the default
+  environment does not fit the packages of the project. Update both:
+  `julia -e 'using Pkg; Pkg.update()'` and
+  `julia --project=. -e 'using Pkg; Pkg.update()'`.
 - Check the artifact toolkit versus driver version:
 
   ```bash
