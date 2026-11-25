@@ -18,7 +18,7 @@
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-11-24 (MSTMforCAS.jl v1.2.1)}
+\date{Last updated: 2026-11-25 (MSTMforCAS.jl v1.2.1)}
 
 \begin{document}
 \maketitle
@@ -134,6 +134,7 @@ $\beta$; $\beta_n$ & norm of the start vector in Tables~\ref{tab:gmres} and \ref
 $\tau_N$; $\tau_{m,n,t}$ & tail bound of the contact order; angular functions of the amplitudes \\
 $\varepsilon$; $\varepsilon_\mathrm{b}$; $\epsilon_\mathrm{t}$ & tolerance of the solver (bound on the squared relative residual); tolerance of the shared basis; requested accuracy of the truncation order \\
 $K$, $K_q$ & number of vectors of the shared basis, for the incident polarisation $q$ \\
+$J$; $t_0$, $t_1$, $t_\mathrm{B}$, $t_\delta$ & number of refractive indices of a sweep; times of Eq.~\eqref{eq:sweep-time-model} \\
 $\sigma$; $\mu^{(a)}$, $\mu^{(b)}$ & shift function $1/(m^2-1)$; slopes of the affine fit \\
 \bottomrule
 \end{tabular}
@@ -950,6 +951,7 @@ The basis itself comes from the affine model.
 The residual therefore does not fall below a floor that the remainder sets, however large $K$ is.
 
 \subsection{Convergence criterion and fallback}
+\label{sec:shared-basis-fallback}
 A refractive index counts as converged if $\|\bm{r}\|^2 / \|\mathbf{T}\bm{p}_\mathrm{inc}\|^2 < \varepsilon$ for both polarisations, with the true residual of Eq.~\eqref{eq:true-residual}.
 This is the criterion of the CBICG solver with the same tolerance $\varepsilon$.
 A refractive index that does not meet it in the basis is solved by CBICG with $\mathbf{V}_K\,\bm{y}$ as the initial guess (keyword \texttt{fallback}, on by default).
@@ -1027,7 +1029,7 @@ The basis size $K$ is 14 to 20 for most aggregates and 27 to 30 for the largest 
 It does not grow with the truncation order.
 Figure~\ref{fig:shared-basis-times} shows the same times.
 The stage that is repeated for every refractive index, the small problem and the residual check, takes \SI{5}{\milli\second} per refractive index for the first row of the table and \SI{95}{\milli\second} for the last.
-The gain therefore grows with the number of refractive indices.
+The gain therefore grows with the number of refractive indices (Sec.~\ref{sec:shared-basis-gain}).
 In an earlier test with a prototype of the method, twelve processes on a 24-thread desktop machine each ran at about \SI{55}{\percent} of the single-process speed.
 
 The option of the parameter sweep was compared with the default on six aggregates and 100 refractive indices ($1.65 \leq \mathrm{Re}\,m \leq 2.55$, $0.55 \leq \mathrm{Im}\,m \leq 1.45$), with six threads and the uniform order 3.
@@ -1064,6 +1066,68 @@ $N_S$ & $D_f$ & $\lambda$ (\si{\nano\meter}) & Order & $K$ & $t_\mathrm{C}$ (\si
 \caption{Times of Table~\ref{tab:shared-basis-time} on a logarithmic axis. $N$ is the number of monomers $N_S$. ``Order 8/4'' is the truncation order 8 with the far order 4.}
 \label{fig:shared-basis-times}
 \end{figure}
+
+\subsection{What sets the gain}
+\label{sec:shared-basis-gain}
+The factors of Table~\ref{tab:shared-basis-time} hold for about 200 refractive indices and for CBICG solves of 6 to 22 iterations.
+A sweep with fewer refractive indices or with fewer iterations per solve gains less.
+Let $J$ be the number of refractive indices and $t_0$ the time of the setup of the translation.
+Let $t_1$ be the time of one CBICG solve without the setup, $t_\mathrm{B}$ the time of the Arnoldi process and $t_\delta$ the time of the stage that is repeated for every refractive index.
+The times of the two methods are
+\begin{equation}
+  t_\mathrm{C} = t_0 + J\,t_1, \qquad
+  t_\mathrm{S} = t_0 + t_\mathrm{B} + J\,t_\delta .
+  \label{eq:sweep-time-model}
+\end{equation}
+The Arnoldi process applies $\mathbf{A}$ $K$ times per polarisation, and one CBICG iteration applies the operator twice (Table~\ref{tab:cbicg}).
+The time $t_\mathrm{B}$ is therefore about that of one CBICG solve with $K/2$ iterations.
+Because $t_\delta \ll t_1$, the gain $t_\mathrm{C}/t_\mathrm{S}$ is nearly proportional to $J$ as long as $J\,t_\delta \ll t_0 + t_\mathrm{B}$.
+For large $J$ it tends to $t_1/t_\delta$.
+The gain is small when the setup dominates, which is the case for small aggregates and for solves of few iterations.
+
+Equation~\eqref{eq:sweep-time-model} counts the setup once for both methods.
+A sweep that runs every refractive index as a separate calculation repeats the setup and takes $J\,(t_0 + t_1)$.
+Against such a sweep the shared basis also saves $J - 1$ setups.
+
+Table~\ref{tab:shared-basis-gain} shows these times for a sweep with few refractive indices.
+The aggregates are in water (refractive index 1.3345) at \SI{512}{\nano\meter}, with $D_f = 2.65$ and monomer size parameters of 0.20 to 0.29.
+The 34 refractive indices are those of a set of black-carbon tables, $1.60 \leq \mathrm{Re}\,m_\mathrm{sphere} \leq 2.20$ and $0.18 \leq \mathrm{Im}\,m_\mathrm{sphere} \leq 1.01$.
+The relative refractive indices have $1.20 \leq \mathrm{Re}\,m \leq 1.65$ and $0.13 \leq \mathrm{Im}\,m \leq 0.76$.
+The times were measured with the package (v1.2.1) on one thread of a 24-thread desktop machine, with FFT translation, order 3 and $\varepsilon = 10^{-6}$.
+The setup time $t_0$ is the time of a run with $\varepsilon = 0.5$.
+It contains at most one iteration and is therefore an upper bound.
+The time $t_\mathrm{S}$ hardly depends on $J$: it is 1.1 to 1.2 times the time of one CBICG run with its setup.
+For $N_S = 11160$ the repeated stage takes about \SI{13}{\milli\second} per refractive index.
+With this value Eq.~\eqref{eq:sweep-time-model} gives a gain of about 100 for $J = 195$, in line with Table~\ref{tab:shared-basis-time}.
+For $J = 34$ the gain is 7 to 20, and 28 to 31 against separate calculations.
+
+\begin{table}[htbp]
+\caption{Sweep over $J$ refractive indices of one aggregate in water at \SI{512}{\nano\meter} ($D_f = 2.65$, order 3, FFT translation, one thread). $t_0$ is the setup of the translation, $t_0 + t_1$ one CBICG run with its setup (mean of three refractive indices), $t_\mathrm{S}$ the time of the shared basis. The last two columns are for $J = 34$.}
+\label{tab:shared-basis-gain}
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} rrcrrrrrrr @{}}
+\toprule
+ & & CBICG & & & \multicolumn{3}{c}{$t_\mathrm{S}$ (\si{\second})} & & \\
+\cmidrule(lr){6-8}
+$N_S$ & $t_0$ (\si{\second}) & iterations & $t_0 + t_1$ (\si{\second}) & $K$ & $J = 5$ & $J = 17$ & $J = 34$ & $\dfrac{t_\mathrm{C}}{t_\mathrm{S}}$ & $\dfrac{J\,(t_0 + t_1)}{t_\mathrm{S}}$ \\
+\midrule
+  400 &  0.43 & 2--6  &  0.56 & 10 &  0.64 &  0.61 &  0.68 &  7.0 & 28 \\
+ 2947 &  2.83 & 3--7  &  5.43 & 12 &  5.76 &  6.12 &  6.33 & 14   & 29 \\
+11160 & 12.8  & 3--10 & 34.8  & 14 & 38.1  & 38.4  & 38.5  & 20   & 31 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The production of these tables confirmed the numbers.
+It covered 34 refractive indices and 31200 pairs of aggregate and orientation, with 20 to 11160 monomers and $2.35 \leq D_f \leq 2.95$.
+The shared basis took 304 process-hours with 20 processes on the desktop machine.
+Earlier tables of the same kind had been computed one refractive index at a time on the server of Table~\ref{tab:shared-basis-time}, at 205 to 354 process-hours per refractive index (mean 262 over eight tables).
+The ratio for 34 refractive indices is 29.
+The basis had 14 to 20 vectors for the aggregates of 11160 monomers.
+All \num{1060800} rows converged in the basis, and none needed the fallback.
+The relative refractive indices with $\mathrm{Re}\,m < 1.30$ lie below the range of Sec.~\ref{sec:shared-basis-limits}.
+The criterion of Sec.~\ref{sec:shared-basis-fallback} was met for them as well.
 
 \subsection{Limits and validated range}
 \label{sec:shared-basis-limits}
