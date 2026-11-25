@@ -21,6 +21,7 @@ have results from an earlier version. The sections after it list all changes by 
 No result of an uninterrupted sweep changes. One case of a resumed GPU sweep changes, and a
 sweep can no longer lose rows at its end (see the table above). CUDA.jl is no longer installed
 with the package.
+The release is archived on Zenodo (DOI 10.5281/zenodo.24526613, published 2026-11-25).
 
 ### Changed
 
