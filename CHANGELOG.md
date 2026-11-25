@@ -139,6 +139,8 @@ No result of an existing option changes. The new method is off by default.
 ## 1.1.1 (2026-11-20)
 
 Same code as 1.1.0. The documents are brought up to date.
+The release is archived on Zenodo (DOI 10.5281/zenodo.24526547, published 2026-11-25).
+The DOI of all archived versions is 10.5281/zenodo.20690115.
 
 - Theory note (`docs/theory_note.pdf`): new sections on the truncation order for touching
   spheres, the far order of the FFT grid, and the cluster T-matrix with the Wigner-D
