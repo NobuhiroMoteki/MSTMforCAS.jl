@@ -136,6 +136,8 @@ No result of an existing option changes. The new method is off by default.
   finding that metal spheres in point contact do not converge below order 30. A paragraph on
   the error that the default tolerance of CBICG leaves in the outputs.
 - README: usage of `sweep_refractive_index` and `shared_basis`, and the measured times.
+- This changelog is added. It was written after the tag v1.1.1, so 1.2.0 is the first release
+  that contains it.
 
 ## 1.1.1 (2026-11-20)
 
@@ -152,7 +154,6 @@ The DOI of all archived versions is 10.5281/zenodo.20690115.
 - Python technical note: the attributes that the sweep writes.
 - The Markdown version of the theory note (`docs/theory_note.md`, state of 0.3.0) is
   removed. The PDF is the maintained version.
-- This changelog is added.
 
 ## 1.1.0 (2026-11-20)
 
