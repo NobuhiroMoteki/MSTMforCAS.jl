@@ -1,0 +1,40 @@
+{
+  "upload_type": "software",
+  "title": "MSTMforCAS.jl: Multi-Sphere T-Matrix light-scattering simulator for Complex Amplitude Sensing",
+  "description": "<p>MSTMforCAS.jl is a Julia implementation of the Multi-Sphere T-Matrix (MSTM) method for aggregates of homogeneous spheres in an infinite homogeneous medium. It follows the Fortran code MSTM v4.0 of D. W. Mackowski and is specialised for Complex Amplitude Sensing (CAS).</p><p>For an aggregate at a fixed orientation and a plane incident wave the package computes the forward and backward scattering amplitude matrices and the extinction, absorption and scattering efficiencies. It is designed for large parameter sweeps over aggregate geometry and complex refractive index, which produce the training data of surrogate models.</p><p>Features: direct and FFT-accelerated translation, CBICG and GMRES solvers, a truncation order for touching monomers from a two-sphere calculation, a refractive-index sweep with a shared Krylov basis, a cluster T-matrix for many orientations, an optional GPU batched solver, and HDF5 or CSV output of resumable sweeps. The results are validated against the Fortran reference code. The theory note in <code>docs/</code> describes the methods and the validation. <code>CHANGELOG.md</code> lists the changes by version and the corrections that change numerical results.</p>",
+  "creators": [
+    {
+      "name": "Moteki, Nobuhiro",
+      "affiliation": "Tokyo Metropolitan University"
+    }
+  ],
+  "license": "mit",
+  "access_right": "open",
+  "keywords": [
+    "light scattering",
+    "multi-sphere T-matrix",
+    "fractal aggregate",
+    "electromagnetic simulation",
+    "complex amplitude sensing",
+    "black carbon",
+    "Julia"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/dmckwski/MSTM",
+      "relation": "references",
+      "scheme": "url",
+      "resource_type": "software"
+    },
+    {
+      "identifier": "https://github.com/NobuhiroMoteki/MSTM-v4.0_for_CAS",
+      "relation": "references",
+      "scheme": "url",
+      "resource_type": "software"
+    }
+  ],
+  "references": [
+    "Mackowski, D.W. & Mishchenko, M.I. (2011). A multiple sphere T-matrix Fortran code for use on parallel computer clusters. J. Quant. Spectrosc. Radiat. Transfer, 112(13), 2182-2192.",
+    "Moteki, N. & Adachi, K. (2024). Measuring the polarized complex forward-scattering amplitudes of single particles in unbounded fluid flow: CAS-v2 protocol. Optics Express, 32(21), 36500-36522."
+  ]
+}
