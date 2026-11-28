@@ -51,6 +51,7 @@ Each column of the sweep results is stored as a 1-D dataset (length = number of 
 | `fft_far_order` | int | `fft_far_order` of the sweep; -1 if not used |
 | `fft_near_factor` | float64 | `fft_near_factor` of the sweep |
 | `shared_basis` | int | 1 if the rows were computed with the shared Krylov basis (`shared_basis = true`, v1.2.0), 0 otherwise. Absent in files of earlier versions |
+| `phase_reference` | string | `particle` or `lab`: point to which the phase of the amplitudes refers (v1.3.0, default `particle`). Absent in files of earlier versions, which use `lab`: their amplitudes carry the factor exp(i k z_r0) of the unweighted mean centre (README, "Phase reference of the amplitudes") |
 | `n_jobs` | int | Total number of result rows. Written by `write_results_hdf5` only, not by the incremental output of `run_parameter_sweep` |
 
 ## CAS-v2 observable quantities
