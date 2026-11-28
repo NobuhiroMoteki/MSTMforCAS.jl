@@ -17,7 +17,7 @@ have results from an earlier version. The sections after it list all changes by 
 | 0.4.4 | all before 0.4.4 | The regular spherical Bessel function `j_n(z)` in the translation matrix was computed by an unstable upward recurrence. | Forward and backward amplitudes of aggregates of sub-wavelength spheres when the truncation order is well above the size parameter (for example order 8 or more at x ≈ 0.3). The values were too large by orders of magnitude. `Q_ext` and the solver were not affected. | Recompute such cases. Calculations with the automatic truncation order used low orders at small x. |
 | 0.4.2 | all before 0.4.2 | The Riccati–Bessel function `ψ_n(x)` of the Mie coefficients was computed by an unstable upward recurrence for x < 1. | Mie coefficients of high order for sub-wavelength spheres (for example `a_7` at x ≈ 0.3), and the amplitudes computed with a truncation order of 7 or more for such spheres. | Recompute such cases. |
 
-## 1.3.0 (2026-11-28, not released yet)
+## 1.3.0 (2026-11-28)
 
 The default phase reference of the amplitudes changes. See the first row of the table above.
 Results for inputs whose unweighted mean centre lies at z = 0 are unchanged, and so are all
