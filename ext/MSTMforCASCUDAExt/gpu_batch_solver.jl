@@ -218,6 +218,8 @@ function gpu_batch_solve_group(
     tol         = use_f32 ? max(params.tol, 1e-5) : params.tol  # relax for FP32
     max_iter    = params.max_iter
     on_result   = get(params, :on_result, nothing)  # optional callback(ri_idx, result, amn)
+    phase_ref   = get(params, :phase_reference, :particle)  # see MSTMforCAS._phase_reference_factor
+    MSTMforCAS._check_phase_reference(phase_ref)
     trunc    = params.truncation_order
 
     # Determine uniform noi_max across all RIs
@@ -347,6 +349,7 @@ function gpu_batch_solve_group(
     # them once avoids N×n_ri redundant _tranordertest and
     # compute_translation_matrix calls (the dominant post-processing cost).
     r0 = vec(sum(positions_x, dims=2)) ./ N
+    ph = MSTMforCAS._phase_reference_factor(r0, phase_ref)
     ntrani_g = Vector{Int}(undef, N)
     for i in 1:N
         dist = sqrt(sum(abs2, r0 .- positions_x[:, i]))
@@ -443,8 +446,8 @@ function gpu_batch_solve_group(
 
             sa_fwd = MSTMforCAS._amplitude_from_mode_coefs(amn0_m1, amn0_m2, nodrt_g, true)
             sa_bwd = MSTMforCAS._amplitude_from_mode_coefs(amn0_m1, amn0_m2, nodrt_g, false)
-            bh83_fwd = ntuple(j -> -2 * sa_fwd[j], 4)
-            bh83_bwd = ntuple(j -> -2 * sa_bwd[j], 4)
+            bh83_fwd = ntuple(j -> -2 * ph * sa_fwd[j], 4)
+            bh83_bwd = ntuple(j -> -2 * ph * sa_bwd[j], 4)
 
             amn_bi = sol.amn[:, :, bi]
             result = MSTMforCAS.ScatteringResult(

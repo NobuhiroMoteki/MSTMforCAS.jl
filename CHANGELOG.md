@@ -9,12 +9,56 @@ have results from an earlier version. The sections after it list all changes by 
 
 | Fixed in | Affected versions | What was wrong | Results that change | What to do |
 |---|---|---|---|---|
+| 1.3.0 | all before 1.3.0 (and the Fortran code MSTM-v4.0_for_CAS) | The amplitudes carried the factor exp(i k z_r0). The incident wave was phased at the plane z = 0 of the input coordinates, and the scattered wave was expanded about r0, the unweighted mean of the sphere centres. z_r0 is the z coordinate of r0. Translating the input along z changed the phase of `S_forward` and `S_backward`, and the optical theorem held only for z_r0 = 0. The default is now `phase_reference = :particle`: both waves refer to r0. | `S_forward` and `S_backward` (and the MI02 and CAS-v2 amplitudes derived from them) of every input whose unweighted mean centre is not at z = 0. Aggregates centred on their mass centroid with monomers of unequal radii are such inputs. In black-carbon tables of PTSA aggregates the factor was 2.2° rms at 637 nm in water and up to 29° for single orientations. The mean amplitude of a cell moved by up to 0.8° and 1.4 %, and the scatter of the rows about it would be 17 to 34 % smaller with the new default (N_p ≥ 206). `Q_ext`, `Q_abs` and `Q_sca` do not change. | Multiply stored amplitudes by exp(−i k z_r0), with z_r0 computed in the frame of the calculation (after any rotation). No new solution is needed. Or set `phase_reference = :lab` to reproduce earlier results bit for bit. |
 | 1.2.1 | 1.1.0 to 1.2.0 | On the GPU path the truncation order of a group came from the refractive indices that remained in the run, not from the whole grid. | Rows of a GPU sweep with `truncation_eps` that were computed after an interruption and a resume. They can have a lower truncation order than the rows before the interruption (in a test order 3 against 7, 0.8 % in `Q_ext`). Uninterrupted sweeps and sweeps without `truncation_eps` are not affected. | Check the column `truncation_order` of such files: within one (aggregate, medium) group it must have one value. Recompute the groups where it has not. |
 | 1.2.1 | all before 1.2.1 | A sweep did not write its row buffer after the last thread had ended. A row that was recorded after the last write was lost. | No value changes. Rows can be missing at the end of a sweep, most likely on the GPU path (one row in 1 of 24 small test sweeps). | Compare the number of rows of a file with the number of jobs. Running the same sweep again with the same output file computes the missing rows. |
 | 1.1.0 | 1.0.1, 0.4.1 to 0.4.5 | The GPU path applied the Mie T-matrix of the first sphere to every sphere in the iteration operator. | All outputs of the GPU path (`use_gpu = true`) for aggregates of unequal spheres. For monomer radii with a relative standard deviation of 0.1, the forward amplitudes of single aggregates were off by about 5 to 20 %. The CPU path and aggregates of equal spheres are not affected. | Recompute the GPU results for aggregates of unequal spheres. In the hybrid mode these are the groups with more monomers than `gpu_np_threshold` (default 500). |
 | 1.1.0 | all before 1.1.0 | The backward amplitude of the OCBS signal had the factor `1/√2` of the printed Eq. (28) of Moteki and Adachi (2024). The corrected equation, given in the erratum to that paper, has `1/2`. | `S_bak` from `scripts/read_results_h5_for_cas.jl` and from the code of the Python technical note. The old value is `√2` times the correct one, with the same phase. | Divide old `S_bak` values by `√2`, or compute `S_bak = (-S11_bwd + S22_bwd) / 2` again. The HDF5 files store `S11_bwd` and `S22_bwd` and need no change. |
 | 0.4.4 | all before 0.4.4 | The regular spherical Bessel function `j_n(z)` in the translation matrix was computed by an unstable upward recurrence. | Forward and backward amplitudes of aggregates of sub-wavelength spheres when the truncation order is well above the size parameter (for example order 8 or more at x ≈ 0.3). The values were too large by orders of magnitude. `Q_ext` and the solver were not affected. | Recompute such cases. Calculations with the automatic truncation order used low orders at small x. |
 | 0.4.2 | all before 0.4.2 | The Riccati–Bessel function `ψ_n(x)` of the Mie coefficients was computed by an unstable upward recurrence for x < 1. | Mie coefficients of high order for sub-wavelength spheres (for example `a_7` at x ≈ 0.3), and the amplitudes computed with a truncation order of 7 or more for such spheres. | Recompute such cases. |
+
+## 1.3.0 (2026-11-28, not released yet)
+
+The default phase reference of the amplitudes changes. See the first row of the table above.
+Results for inputs whose unweighted mean centre lies at z = 0 are unchanged, and so are all
+efficiencies.
+
+### Changed
+
+- `compute_scattering`, `sweep_refractive_index`, `cluster_forward_amplitudes` and the GPU
+  batched solver take the keyword `phase_reference` (`:particle` by default, or `:lab`).
+  `:particle` refers the incident and the scattered wave to the unweighted mean of the sphere
+  centres. The amplitudes then do not depend on the coordinate origin of the input, and the
+  backward amplitude refers to that point. `:lab` is the convention before 1.3.0 and of the amplitudes
+  printed by MSTM-v4.0_for_CAS. The factor is applied after the solve. The solver, the returned coefficients `amn`
+  and the efficiencies are unchanged, and `:lab` reproduces earlier results bit for bit on
+  every path (direct, FFT, shared basis with and without the fallback, cluster T-matrix, GPU).
+- `cluster_forward_amplitudes` with the default now equals `compute_scattering` for the
+  geometry rotated about any point. With `:lab` it keeps the factor of the unrotated mean
+  centre, as before.
+- `SweepConfig.phase_reference` (default `:particle`). Sweep files record it in the attribute
+  `phase_reference`. Files without the attribute are taken as `:lab`, and a sweep refuses to
+  resume a file written with the other convention.
+- Scripts: option `--phase-reference particle|lab` in `run_sweep_h5.jl`,
+  `run_sweep_h5_regen.jl` and `run_sampled_lut.jl`. `run_sweep_h5_extension.jl` uses `:lab`,
+  because the file it extends was computed before 1.3.0. `merge_sweep_h5.jl` and
+  `merge_extension_h5.jl` refuse inputs of different conventions and record the convention.
+- `scripts/validate_testcases.jl` and `test/test_fortran_unequal_radii.jl` compare with the
+  Fortran output using `:lab`. The reference values are unchanged.
+
+### Added
+
+- `test/test_phase_reference.jl`: translation invariance, the factor between the two
+  conventions on all CPU paths, the optical theorem, a single sphere off the origin, the
+  cluster T-matrix rotated about different points, refused keyword values, and the attribute
+  of sweep files.
+
+### Documents
+
+- Theory note: new Sec. 6.3 on the phase reference, with the derivation, the effect on the
+  black-carbon tables and the check of the Fortran test case 2 (its printed amplitudes satisfy
+  the optical theorem only after the factor exp(−i z_r0)).
+- README: the phase reference under the convention definitions.
 
 ## 1.2.1 (2026-11-24)
 

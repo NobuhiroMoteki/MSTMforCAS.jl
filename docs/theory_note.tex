@@ -18,7 +18,7 @@
 \title{Technical Note: Multi-Sphere T-Matrix Theory\\[4pt]
 \large Mathematical Formulation and Computational Implementation}
 \author{N.\ Moteki}
-\date{Last updated: 2026-11-25 (MSTMforCAS.jl v1.2.1)}
+\date{Last updated: 2026-11-28 (MSTMforCAS.jl v1.3.0)}
 
 \begin{document}
 \maketitle
@@ -331,6 +331,8 @@ for the first incident polarisation ($q = 1$), and
 \end{equation}
 for $q = 2$.
 The phase factor $e^{iz_i}$ accounts for the spatial position of sphere $i$ along the propagation direction.
+It phases the incident wave at the laboratory plane $z = 0$.
+Section~\ref{sec:phase-reference} gives the reference point of the output amplitudes.
 The interaction equation is solved for the two incident polarisations $q = 1, 2$.
 
 \subsection{Truncation order for touching spheres}
@@ -1317,6 +1319,56 @@ At $\theta = 180^\circ$ an additional factor of $(-1)^n$ appears, and the signs 
 For a single sphere or a symmetric dimer with the symmetry axis along $z$, $S_3 = S_4 = 0$ by symmetry.
 For general aggregates lacking such symmetry, all four elements are non-zero.
 
+\subsection{Phase reference of the amplitudes}
+\label{sec:phase-reference}
+
+Equation~\eqref{eq:amplitude-sum} uses the expansion about $\bm{r}_0$, the unweighted mean of the sphere centres.
+It gives the far field as if the scattered wave left from $\bm{r}_0$.
+The incident coefficients of Sec.~\ref{sec:incident} phase the incident wave at the plane $z = 0$.
+At $\bm{r}_0$ the incident wave therefore has the phase $e^{iz_0}$, where $z_0$ is the dimensionless $z$ coordinate of $\bm{r}_0$.
+Let $S_j^{(\bm{r}_0)}$ denote the amplitude with both waves referred to $\bm{r}_0$.
+It depends only on the positions of the spheres relative to each other.
+Equation~\eqref{eq:amplitude-sum} with the coefficients of Eqs.~\eqref{eq:pinc-q1} and \eqref{eq:pinc-q2} gives
+\begin{equation}
+  S_j^\mathrm{lab} = e^{iz_0}\, S_j^{(\bm{r}_0)} .
+  \label{eq:phase-lab}
+\end{equation}
+The amplitude with both waves referred to the coordinate origin would be
+$S_j^{(\bm{0})} = e^{i(\bm{k}_\mathrm{inc} - \bm{k}_\mathrm{sca})\cdot\bm{r}_0}\, S_j^{(\bm{r}_0)}$ in units with $k = 1$.
+This equals $S_j^{(\bm{r}_0)}$ in the forward direction and $e^{2iz_0} S_j^{(\bm{r}_0)}$ in the backward direction.
+$S_j^\mathrm{lab}$ follows neither convention.
+It changes by $e^{i\Delta z}$ in both directions when the input is translated by $\Delta z$ along the incident direction.
+
+The Fortran code \texttt{MSTM-v4.0\_for\_CAS} prints $S_j^\mathrm{lab}$, and all versions of the package before 1.3.0 return it.
+MSTM v4.0 phases the incident wave in the same way but prints only the scattering (Mueller) matrix, which does not depend on the phase.
+From version 1.3.0 the package returns $S_j^{(\bm{r}_0)}$ by default (keyword \texttt{phase\_reference = :particle}).
+The interaction equation is linear in the incident coefficients.
+Multiplying the amplitudes by $e^{-iz_0}$ after the solve therefore gives exactly the solution for an incident wave phased at $\bm{r}_0$.
+The solver, the coefficients $\bm{a}^{(i)}$ and the efficiencies are not changed.
+The keyword value \texttt{:lab} returns $S_j^\mathrm{lab}$ and reproduces the earlier results bit for bit.
+
+The default has three properties.
+\begin{itemize}[nosep]
+  \item Translating the input changes none of the outputs.
+  \item In the forward direction the scattered and the incident wave accumulate the same phase after the particle.
+  A measurement of $S(0^\circ)$, such as with the CAS-v2, therefore does not depend on where the particle crosses the beam.
+  $S_j^{(\bm{r}_0)}(0^\circ)$ is this translation-invariant amplitude.
+  \item The optical theorem holds in the form
+  $Q_\mathrm{ext} = (4/x_\mathrm{eff}^2)\,\mathrm{Re}\,[S_1(0^\circ) + S_2(0^\circ)]/2$.
+  With $S_j^\mathrm{lab}$ it holds only for $z_0 = 0$.
+\end{itemize}
+In the backward direction the phase depends on the reference point physically.
+With the default the reference point of the backward amplitude is $\bm{r}_0$.
+
+The difference matters when $\bm{r}_0$ is not at the origin of the input coordinates.
+Aggregate generators often centre an aggregate on its mass centroid.
+For monomers of unequal radii the unweighted mean of the centres lies a few nanometres from it.
+In the black-carbon tables of 2026-11-27 (PTSA aggregates, $N_p = 20$ to \num{21720}, rotated about the mass centroid) $k z_0$ is \SI{2.2}{\degree} rms at \SI{637}{\nano\meter} in water and reaches \SI{29}{\degree} for single rows.
+The phase of the mean amplitude of a cell ($N_p$, $D_f$) changes by up to \SI{0.8}{\degree} and its magnitude by up to 1.4\,\%.
+With $S_j^{(\bm{r}_0)}$ the scatter of the rows about the cell mean is 17 to 34\,\% smaller for $N_p \ge 206$ (median over $D_f$, three bands).
+Stored amplitudes of the convention \texttt{:lab} are converted by the factor $e^{-ikz_0}$, with $z_0$ the $z$ coordinate of the unweighted mean of the centres in the frame of the calculation.
+No new solution is needed.
+
 \subsection{Cross-section efficiencies}
 
 The dimensionless efficiency factors are defined as $Q = C / (\pi\,a_\mathrm{eff}^2)$ where $C$ is the corresponding cross section, and computed for unpolarised incidence by averaging over the two incident polarisations $q = 1, 2$.
@@ -1451,8 +1503,11 @@ The scattered coefficients about the origin are
   \label{eq:cluster-orientation}
 \end{equation}
 where $\bm{p}_{0,z}$ holds the plane-wave coefficients of Sec.~\ref{sec:incident} at the origin.
-They carry the phase factor $e^{i z_0}$, where $z_0$ is the dimensionless $z$ coordinate of $\bm{r}_0$.
-The phase reference is then the laboratory plane $z = 0$, as in the fixed-orientation solution.
+The rotation turns the particle about $\bm{r}_0$.
+With the default \texttt{phase\_reference = :particle} the incident wave is phased at $\bm{r}_0$ (Sec.~\ref{sec:phase-reference}).
+The amplitudes then equal those of the direct solution for the rotated geometry, whatever point the geometry was rotated about.
+With \texttt{:lab} the coefficients carry the factor $e^{i z_0}$ of the unrotated $\bm{r}_0$, as in all versions before 1.3.0.
+These amplitudes equal the direct solution with \texttt{:lab} only for a geometry rotated about $\bm{r}_0$.
 Equation~\eqref{eq:cluster-orientation} is evaluated from right to left as two rotations of a vector and one product of a matrix and a vector.
 The cost per orientation is $O(N_\mathrm{cl}^2)$.
 The forward amplitudes $S_1$ to $S_4$ follow from $\bm{a}_0(\Omega)$ by Eq.~\eqref{eq:mode-transform} and Eq.~\eqref{eq:amplitude-sum}.
@@ -1460,7 +1515,8 @@ $\Omega = (0, 0, 0)$ reproduces the fixed-orientation result.
 
 The implementation was checked in two ways.
 At $\Omega = (0,0,0)$ the amplitudes agree with the direct solution of Eq.~\eqref{eq:global-system}.
-At other orientations they agree with the direct solution for the geometry rotated about its centroid by the same angles.
+At other orientations they agree with the direct solution for the geometry rotated by the same angles.
+With the default phase reference this holds for any centre of rotation (\texttt{test/test\_phase\_reference.jl}).
 The present functions return the forward amplitudes only.
 
 %% ============================================================
@@ -1480,6 +1536,10 @@ All calculations use $\varepsilon = 10^{-6}$ and the single-sphere truncation or
   \item \textbf{Test case 3}: the same aggregate with the FFT translation of Sec.~\ref{sec:fft-translation}.
 \end{itemize}
 The package needs the same number of iterations as the Fortran code in all three cases (3, 18 and 18).
+The Fortran code phases the incident wave at $z = 0$, so the comparison uses \texttt{phase\_reference = :lab} (Sec.~\ref{sec:phase-reference}).
+The mean centre of test cases 2 and 3 lies at $z_0 = -0.108$.
+The printed Fortran amplitudes of test case 2 give $(4/x_\mathrm{eff}^2)\,\mathrm{Re}\,[S_1 + S_2]/2 = 10.47$ against $Q_\mathrm{ext} = 11.19$.
+After the factor $e^{-iz_0}$ they give 11.189.
 
 \begin{table}[htbp]
 \caption{Relative difference between the package (v1.2.0) and the printed Fortran output. For the amplitudes it is the largest value of $|S^\mathrm{Julia} - S^\mathrm{Fortran}| / |S^\mathrm{Fortran}|$ over the elements named. In test case 1 the elements $S_3$, $S_4$ vanish.}
@@ -1532,6 +1592,7 @@ The package was therefore also compared with the Fortran code for fractal aggreg
 The radii have a relative standard deviation of 0.08 to 0.10, and the size parameters lie between 0.21 and 0.32 (wavelength \SI{632.8}{\nano\meter} in water).
 Both codes use direct translation, $\varepsilon = 10^{-6}$ and the single-sphere truncation order.
 The Fortran code was run anew for these cases.
+The aggregates are centred on their mass centroid, so the package is run with \texttt{phase\_reference = :lab}.
 
 \begin{table}[htbp]
 \caption{Relative difference between the package and the Fortran output for aggregates with unequal monomer radii, direct translation in both codes, $\varepsilon = 10^{-6}$. The amplitude columns give the larger of the differences of $S_1$ and $S_2$.}

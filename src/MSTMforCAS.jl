@@ -66,6 +66,13 @@ Holds the scattering computation output for a single (aggregate, refractive inde
 # Fields
 - `S_forward::NTuple{4, ComplexF64}`: S₁, S₂, S₃, S₄ at θ=0° (BH83 convention)
 - `S_backward::NTuple{4, ComplexF64}`: S₁, S₂, S₃, S₄ at θ=180° (BH83 convention)
+
+The phase of both amplitudes refers to the point given by `phase_reference` of the function
+that produced them. The default `:particle` refers the incident and the scattered wave to the
+unweighted mean of the sphere centres. The amplitudes then do not depend on the coordinate
+origin of the input. With `:lab` the incident wave refers to the plane z = 0 and the scattered
+wave to the mean of the centres. This was the only convention before version 1.3.0 and is the
+convention of the amplitudes printed by the Fortran code MSTM-v4.0_for_CAS.
 - `Q_ext::Float64`: Polarization-averaged extinction efficiency (dimensionless)
 - `Q_abs::Float64`: Polarization-averaged absorption efficiency (= Q_ext - Q_sca)
 - `Q_sca::Float64`: Polarization-averaged scattering efficiency, from the expansion about the

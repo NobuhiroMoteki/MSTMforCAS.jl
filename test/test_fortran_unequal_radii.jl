@@ -9,6 +9,10 @@
 # tolerances below. The package differed from these values by at most 1.9e-4 in S1, S2
 # and by at most 3.1e-5 in the efficiencies when the test was written.
 #
+# The Fortran code phases the incident wave at the lab plane z = 0. The fixtures have their
+# mass centroid at the origin, not the unweighted mean of the centres, so the amplitudes are
+# compared with phase_reference = :lab (the default :particle differs by exp(-i z_r0)).
+#
 # Fixtures: fractal aggregates with D_f = 2.35, mean monomer radius 0.020 μm and a relative
 # standard deviation of the radii of 0.10 (file columns x y z r in μm).
 
@@ -45,7 +49,8 @@
             pos, rad = agg.positions, agg.radii          # shape: (3, N), (N,)
             @test maximum(rad) / minimum(rad) > 1.3       # the radii differ
 
-            r, _ = compute_scattering(pos, rad, m_rel; use_fft = false, tol = 1e-12, max_iter = 500)
+            r, _ = compute_scattering(pos, rad, m_rel; use_fft = false, tol = 1e-12, max_iter = 500,
+                                    phase_reference = :lab)
             @test r.converged
             @test r.truncation_order == 3                 # largest Mie order of the Fortran run
 
@@ -69,7 +74,8 @@
     @testset "default tolerance" begin
         file, m_rel, S_fwd, S_bwd, Q = cases[3]
         agg = read_aggregate_file(joinpath(@__DIR__, "fixtures", file); scale_factor = k_medium)
-        r, _ = compute_scattering(agg.positions, agg.radii, m_rel; use_fft = false)
+        r, _ = compute_scattering(agg.positions, agg.radii, m_rel; use_fft = false,
+                                  phase_reference = :lab)
         @test r.converged
         for i in 1:2
             @test isapprox(r.S_forward[i],  S_fwd[i]; rtol = 2e-3)

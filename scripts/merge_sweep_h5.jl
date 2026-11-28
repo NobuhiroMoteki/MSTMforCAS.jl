@@ -16,7 +16,8 @@ Run with:
 - Rows with the same (source, wavelength, m_real, m_imag) in more than one place are an
   error.
 
-The output file is written in one piece. Root attributes are not copied.
+The output file is written in one piece. Root attributes are not copied, except
+`phase_reference`: inputs of different conventions are refused (no attribute = `lab`).
 """
 
 using HDF5, Printf
@@ -96,6 +97,12 @@ function main()
     end
     n_total = sum(count, masks)
 
+    # Rows of the two phase conventions must not be merged (files before 1.3.0 have no attribute: lab)
+    prs = [h5open(f -> haskey(HDF5.attrs(f), "phase_reference") ? String(HDF5.attrs(f)["phase_reference"]) : "lab", p, "r")
+           for p in inputs]
+    allequal(prs) || error("inputs have different phase_reference attributes: " *
+                           join(["$(basename(p))=$(r)" for (p, r) in zip(inputs, prs)], ", "))
+
     # ── Copy dataset by dataset ──────────────────────────────────────────────
     names = h5open(f -> sort(collect(keys(f))), inputs[1], "r")
     h5open(out, "w") do fo
@@ -114,6 +121,7 @@ function main()
         HDF5.attrs(fo)["core_subset"] = core ? 1 : 0
         HDF5.attrs(fo)["df_min"] = df_min
         HDF5.attrs(fo)["df_max"] = df_max
+        HDF5.attrs(fo)["phase_reference"] = prs[1]
     end
     @printf("wrote %s: %d rows, %d datasets\n", out, n_total, length(names))
 end

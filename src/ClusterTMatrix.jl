@@ -149,7 +149,8 @@ function build_cluster_tmatrix(positions::Matrix{Float64}, radii::Vector{Float64
 end
 
 """
-    cluster_forward_amplitudes(T_cl, nodrt, r0, α, β, γ) -> NTuple{4,ComplexF64}
+    cluster_forward_amplitudes(T_cl, nodrt, r0, α, β, γ; phase_reference=:particle)
+        -> NTuple{4,ComplexF64}
 
 BH83 forward scattering amplitudes `(S1,S2,S3,S4)` at particle orientation
 (intrinsic ZYZ Euler `α,β,γ`), evaluated from the cluster T-matrix by strategy
@@ -157,18 +158,28 @@ R2: rotate the origin plane-wave incident vector by `D(Ω)^†`, apply `T_cl`, r
 back by `D(Ω)`, and read the `m=±1` forward amplitude. `Ω=(0,0,0)` reproduces the
 fixed +z-incidence result.
 
-`r0` is the common origin (aggregate centroid) returned by `build_cluster_tmatrix`;
-the incident plane wave is phase-referenced to the lab plane `z=0` (matching
-`compute_scattering`) by the factor `exp(i·r0[3])` (medium wavenumber = 1).
+`r0` is the common origin (unweighted mean of the sphere centres) returned by
+`build_cluster_tmatrix`. The orientation rotates the aggregate about `r0`.
+
+`phase_reference`:
+- `:particle` (default): the incident wave is phased at `r0`. The amplitudes equal those of
+  `compute_scattering` (default `phase_reference`) for the rotated geometry, whatever the
+  centre of the rotation.
+- `:lab`: the incident wave is phased at the lab plane z = 0 by the factor `exp(i·r0[3])`
+  of the UNROTATED `r0` (medium wavenumber = 1). This is the behaviour before version 1.3.0.
+  It equals `compute_scattering(...; phase_reference=:lab)` only at Ω = (0,0,0) or for a
+  geometry rotated about `r0`.
 """
 function cluster_forward_amplitudes(T_cl::Matrix{ComplexF64}, nodrt::Int,
                                     r0::AbstractVector{Float64},
-                                    α::Real=0.0, β::Real=0.0, γ::Real=0.0)
+                                    α::Real=0.0, β::Real=0.0, γ::Real=0.0;
+                                    phase_reference::Symbol = :particle)
+    _check_phase_reference(phase_reference)
     hnb0 = nodrt * (nodrt + 2)
 
-    # origin incident plane-wave coefficients (z), phase-referenced to lab z=0
-    # via exp(i·r0[3]) so the absolute phase matches compute_scattering.
-    phase0 = cis(r0[3])
+    # origin incident plane-wave coefficients (z). :lab phases them at the lab plane z=0
+    # via exp(i·r0[3]) (behaviour before 1.3.0); :particle phases them at r0.
+    phase0 = phase_reference === :lab ? cis(r0[3]) : one(ComplexF64)
     p0 = _genplanewavecoef_z0(nodrt)          # (hnb0, 2, 2)  [kl, p, q]
     pinc = zeros(ComplexF64, 2 * hnb0, 2)
     for q in 1:2, p in 1:2, kl in 1:hnb0

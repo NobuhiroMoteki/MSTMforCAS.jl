@@ -62,6 +62,13 @@ Q = \frac{C}{\pi R_{\mathrm{ve}}^2}, \qquad R_{\mathrm{ve}} = \left(\sum_i r_i^3
 
 where $C$ is the cross section and $R_{\rm ve}$ is the volume-equivalent sphere radius.
 
+**Phase reference of the amplitudes** (keyword `phase_reference`, version 1.3.0):
+
+- `:particle` (default): the incident and the scattered wave both refer to the unweighted mean of the sphere centres, $\boldsymbol{r}_0$. Translating the input changes none of the outputs. The forward amplitude is the translation-invariant amplitude that a measurement of $S(0^\circ)$ gives, and $Q_\mathrm{ext} = (4/x_\mathrm{ve}^2)\,\mathrm{Re}\,[S_1(0^\circ) + S_2(0^\circ)]/2$ holds. The backward amplitude refers to $\boldsymbol{r}_0$.
+- `:lab`: the incident wave is phased at the plane $z = 0$ of the input coordinates and the scattered wave at $\boldsymbol{r}_0$. This is the convention of the amplitudes printed by the Fortran code MSTM-v4.0_for_CAS and of all versions before 1.3.0. Both amplitudes then carry the factor $e^{ikz_0}$, where $z_0$ is the $z$ coordinate of $\boldsymbol{r}_0$.
+
+The two differ only when $\boldsymbol{r}_0$ is not at the origin of the input. Aggregates centred on their mass centroid with monomers of unequal radii are such a case: in black-carbon tables of PTSA aggregates the factor was 2.2° rms at 637 nm in water and up to 29° for single orientations. Convert stored `:lab` amplitudes with the factor $e^{-ikz_0}$, computed in the frame of the calculation (after any rotation). No new solution is needed. Sweep files record the convention in the attribute `phase_reference`. Files without it come from versions before 1.3.0 and use `:lab`. See the theory note, Sec. 6.3.
+
 ## Installation
 
 For full from-scratch setup instructions on **Windows (WSL2 + Ubuntu)** and **native Linux (Ubuntu)**, see [docs/installation_guide.md](docs/installation_guide.md). The summary below assumes Julia ≥ 1.10 and a working build toolchain are already in place.
@@ -139,6 +146,7 @@ All length inputs (positions, radii, wavelength) must be given in **the same phy
 | `fft_far_order` | `Union{Int,Nothing}` | With FFT translation, the multipole order that the grid carries. Higher orders couple near pairs only, by direct translation (default `nothing` = the grid carries all orders). `0` selects the single-sphere Mie order. | `4` |
 | `fft_near_factor` | `Float64` | Near-pair criterion for `fft_far_order`: center distance at most this factor times the sum of the radii (default `1.5`) | `1.5` |
 | `solver` | `Symbol` | Iterative solver: `:cbicg` (default) or `:gmres` | `:gmres` |
+| `phase_reference` | `Symbol` | Point to which the phase of the amplitudes refers: `:particle` (default, the unweighted mean of the sphere centres) or `:lab` (incident wave at z = 0, the convention before 1.3.0). See [Convention definitions](#convention-definitions). Recorded in the file attribute `phase_reference` | `:lab` |
 | `use_gpu` | `Bool` | GPU-accelerated batched solver (default `false`; implies `use_fft=true`) | `true` |
 | `gpu_float32` | `Bool` | Use Float32 for GPU BiCG iterations (default `false`). It has an effect only together with `use_gpu=true`. The script option `--float32` sets both. | `true` |
 | `gpu_np_threshold` | `Int` | Hybrid mode threshold: groups with Np ≤ this value are processed by CPU threads concurrently with the GPU task (default `500`; set to `0` to disable hybrid and send all groups to GPU) | `500` |
@@ -519,12 +527,13 @@ MSTMforCAS.jl/
 │   ├── design_wigner_d_multiorientation.md  # Design of the cluster T-matrix and orientation path
 │   └── technical_note_use_results_from_python.md  # Python reader guide + code
 └── test/                      # Unit tests, with Fortran reference values for aggregates of unequal spheres
+                               #   and the translation invariance of the amplitudes (test_phase_reference.jl)
     └── fixtures/              # Sphere positions of the test aggregates
 ```
 
 ## Validation
 
-The package was compared with the Fortran code MSTM-v4.0_for_CAS. The Fortran output has four significant digits for the amplitudes and five for the efficiencies, so differences of about 2e-4 are at its printed precision. The numbers below are relative differences. Section 8 of the theory note has the details.
+The package was compared with the Fortran code MSTM-v4.0_for_CAS. The Fortran code phases the incident wave at z = 0, so these comparisons use `phase_reference = :lab`. The Fortran output has four significant digits for the amplitudes and five for the efficiencies, so differences of about 2e-4 are at its printed precision. The numbers below are relative differences. Section 8 of the theory note has the details.
 
 **Test cases of the Fortran distribution** (equal spheres, default tolerance 1e-6):
 

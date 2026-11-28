@@ -5,6 +5,7 @@ Results are written incrementally to HDF5 — safe to interrupt and resume.
 Run with:
   julia --project=. scripts/run_sweep_h5.jl [--fft] [--truncation-order N] [--truncation-eps EPS]
                                             [--fft-far-order F] [--shared-basis]
+                                            [--phase-reference particle|lab]
   julia -t auto --project=. scripts/run_sweep_h5.jl [--fft]
   julia --project=. scripts/run_sweep_h5.jl --gpu
 
@@ -29,6 +30,10 @@ Options:
                          order is then used for all spheres and refractive indices of an
                          aggregate: the largest over the refractive index grid. Not available
                          with --gpu. Results go to a separate file (suffix _sb).
+  --phase-reference R  : particle (default) or lab. Point to which the phase of the amplitudes
+                         refers (see compute_scattering). lab is the convention before
+                         MSTMforCAS.jl 1.3.0. An existing output file written with the other
+                         convention is refused: resume a file of an earlier version with lab.
 """
 
 using MSTMforCAS, Printf
@@ -70,6 +75,16 @@ end
 
 shared_basis = "--shared-basis" in ARGS
 shared_basis && use_gpu && error("--shared-basis is not available with --gpu or --float32")
+
+phase_reference = let pr = "particle"
+    for (i, arg) in enumerate(ARGS)
+        if arg == "--phase-reference" && i < length(ARGS)
+            pr = ARGS[i+1]
+        end
+    end
+    pr in ("particle", "lab") || error("--phase-reference must be particle or lab, got $pr")
+    Symbol(pr)
+end
 
 # ─── Aggregate data files ────────────────────────────────────────────────────
 # HDF5 + CSV catalog produced by aggregate_generator_PTSA
@@ -113,6 +128,7 @@ config = SweepConfig(
     truncation_eps     = truncation_eps,
     fft_far_order      = fft_far_order,
     shared_basis       = shared_basis,
+    phase_reference    = phase_reference,
     use_gpu            = use_gpu,
     gpu_float32        = gpu_float32,
     gpu_np_threshold   = 500,
@@ -126,7 +142,7 @@ n_jobs = length(aggregates) * n_mc * n_ri
 println("Medium conditions ($n_mc): $(config.medium_conditions)")
 println("RI grid: m_real ∈ [$mr_min, $mr_max] (n=$mr_n) × m_imag ∈ [$mi_min, $mi_max] (n=$mi_n) → $n_ri RI values")
 println("Total jobs: $n_jobs ($(length(aggregates)) aggregates × $n_mc media × $n_ri RIs)")
-println("Threads: $(Threads.nthreads()), use_fft: $use_fft, use_gpu: $use_gpu, gpu_float32: $gpu_float32, truncation_order: $(truncation_order === nothing ? "auto" : truncation_order), truncation_eps: $(truncation_eps === nothing ? "off (Mie criterion only)" : truncation_eps), fft_far_order: $(fft_far_order === nothing ? "off (grid carries all orders)" : fft_far_order), shared_basis: $shared_basis")
+println("Threads: $(Threads.nthreads()), use_fft: $use_fft, use_gpu: $use_gpu, gpu_float32: $gpu_float32, truncation_order: $(truncation_order === nothing ? "auto" : truncation_order), truncation_eps: $(truncation_eps === nothing ? "off (Mie criterion only)" : truncation_eps), fft_far_order: $(fft_far_order === nothing ? "off (grid carries all orders)" : fft_far_order), shared_basis: $shared_basis, phase_reference: $phase_reference")
 if !use_gpu && Threads.nthreads() == 1
     @warn "Running CPU mode with 1 thread. Use `julia -t auto` for multi-threaded parallel execution."
 end

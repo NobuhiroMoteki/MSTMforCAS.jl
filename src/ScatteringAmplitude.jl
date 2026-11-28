@@ -8,9 +8,45 @@ multi-sphere scattered-field expansion coefficients (lr_tran basis).
 - BH83 = Bohren & Huffman (1983) amplitude matrix convention
 - lr_tran basis: p=1 block (a_n Mie), p=2 block (b_n Mie)
 - Q_ext/abs/sca are dimensionless efficiencies (cross section / π a_eff²)
+- Phase reference of the amplitudes: see `_phase_reference_factor`
 """
 
 export compute_scattering
+
+# ─────────────────────────────────────────────────────────────
+# Phase reference of the amplitudes
+# ─────────────────────────────────────────────────────────────
+
+"""
+    _phase_reference_factor(r0, phase_reference) -> ComplexF64
+
+Factor applied to the amplitudes computed with the incident coefficients of the solver.
+
+The solver phases the incident plane wave at the lab plane z = 0: sphere i receives
+exp(i zᵢ), with zᵢ = k_medium × z-position. The scattered field is expanded about `r0`, the
+unweighted mean of the sphere centres, shape (3,). The amplitudes from these coefficients
+therefore carry exp(i r0[3]) (convention `:lab`, as in the amplitudes printed by the
+Fortran code MSTM-v4.0_for_CAS).
+
+- `:particle` (default): returns exp(-i r0[3]). Incident and scattered waves then both refer
+  to `r0`. The amplitudes do not change when the input is translated. In the forward
+  direction this is the translation-invariant amplitude that a measurement of S(0) gives,
+  and 4/x² Re S(0) equals Q_ext (optical theorem).
+- `:lab`: returns 1, the convention of all versions before 1.3.0.
+
+The solver is linear in the incident coefficients, so this factor gives exactly the result
+of phasing the incident wave at `r0`. Q_ext, Q_abs and Q_sca do not depend on it.
+"""
+function _phase_reference_factor(r0::AbstractVector{Float64}, phase_reference::Symbol)::ComplexF64
+    _check_phase_reference(phase_reference)
+    return phase_reference === :particle ? cis(-r0[3]) : one(ComplexF64)
+end
+
+function _check_phase_reference(phase_reference::Symbol)::Nothing
+    phase_reference in (:particle, :lab) || throw(ArgumentError(
+        "phase_reference must be :particle or :lab, got :$(phase_reference)"))
+    return nothing
+end
 
 # ─────────────────────────────────────────────────────────────
 # Volume-equivalent sphere radius (for efficiency normalisation)
@@ -426,7 +462,8 @@ end
         truncation_order::Union{Int,Nothing} = nothing,
         fft_far_order::Union{Int,Nothing} = nothing,
         fft_near_factor::Float64 = 1.5,
-        initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing
+        initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing,
+        phase_reference::Symbol = :particle
     ) -> (ScatteringResult, Matrix{ComplexF64})
 
 Compute multi-sphere scattering amplitudes and cross sections.
@@ -441,11 +478,17 @@ Compute multi-sphere scattering amplitudes and cross sections.
   (see `solve_tmatrix`). Default `nothing`: the grid carries all orders.
 - `initial_amn`: if provided, use as initial guess for the iterative solver
   (continuation method for refractive index sweeps)
+- `phase_reference`: point to which the phase of the amplitudes refers. `:particle`
+  (default): the unweighted mean of the sphere centres, for the incident and the scattered
+  wave. The amplitudes then do not depend on the coordinate origin of `positions`. `:lab`:
+  incident wave at the plane z = 0, the only convention before version 1.3.0 (see
+  `_phase_reference_factor`).
 
 # Returns
 A tuple `(result, amn)`:
 - `result::ScatteringResult`: BH83 amplitudes S₁–S₄ at forward/backward and Q efficiencies
-- `amn::Matrix{ComplexF64}`: solver coefficients (can be passed as `initial_amn` to a subsequent call)
+- `amn::Matrix{ComplexF64}`: solver coefficients (can be passed as `initial_amn` to a subsequent
+  call). They belong to the incident wave phased at z = 0 whatever `phase_reference` is.
 """
 function compute_scattering(
     positions::Matrix{Float64},
@@ -459,9 +502,11 @@ function compute_scattering(
     solver::Symbol = :cbicg,
     initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing,
     fft_far_order::Union{Int,Nothing} = nothing,
-    fft_near_factor::Float64 = 1.5
+    fft_near_factor::Float64 = 1.5,
+    phase_reference::Symbol = :particle
 )::Tuple{ScatteringResult, Matrix{ComplexF64}}
 
+    _check_phase_reference(phase_reference)
     N = length(radii)
 
     # ── Solve T-matrix interaction equation ──────────────────────────────────
@@ -513,8 +558,9 @@ function compute_scattering(
     sa_fwd = _amplitude_from_mode_coefs(amn0_mode1, amn0_mode2, nodrt, true)
     sa_bwd = _amplitude_from_mode_coefs(amn0_mode1, amn0_mode2, nodrt, false)
 
-    bh83_fwd = ntuple(i -> -2 * sa_fwd[i], 4)
-    bh83_bwd = ntuple(i -> -2 * sa_bwd[i], 4)
+    ph = _phase_reference_factor(r0, phase_reference)
+    bh83_fwd = ntuple(i -> -2 * ph * sa_fwd[i], 4)
+    bh83_bwd = ntuple(i -> -2 * ph * sa_bwd[i], 4)
 
     return (ScatteringResult(
         bh83_fwd,
