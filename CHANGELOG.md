@@ -22,6 +22,7 @@ have results from an earlier version. The sections after it list all changes by 
 The default phase reference of the amplitudes changes. See the first row of the table above.
 Results for inputs whose unweighted mean centre lies at z = 0 are unchanged, and so are all
 efficiencies.
+The release is archived on Zenodo (DOI 10.5281/zenodo.24619196, published 2026-11-28).
 
 ### Changed
 
