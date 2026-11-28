@@ -99,6 +99,11 @@ function main()
             HDF5.attrs(fout)["medium_conditions_wavelength"] = wl_vals
             HDF5.attrs(fout)["medium_conditions_refindex"]   = nmed_vals
         end
+        # Both files must use one phase convention (files before 1.3.0 have no attribute: lab)
+        prs = [HDF5.h5open(f -> haskey(HDF5.attrs(f), "phase_reference") ?
+                   String(HDF5.attrs(f)["phase_reference"]) : "lab", p, "r") for p in (ORIGINAL_H5, EXTENSION_H5)]
+        allequal(prs) || error("original and extension have different phase_reference: $(prs)")
+        HDF5.attrs(fout)["phase_reference"] = prs[1]
         HDF5.attrs(fout)["m_real_range"] = Float64[M_REAL_RANGE_NEW...]
         HDF5.attrs(fout)["m_imag_range"] = Float64[M_IMAG_RANGE_NEW...]
 

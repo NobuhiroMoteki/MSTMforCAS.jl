@@ -80,6 +80,12 @@ Configuration for a parameter sweep computation.
   holds the basis size, plus the CBICG iterations of such rows. A warning is issued if the
   sweep lies outside the validated range (`shared_basis_range_issues`). Not available
   together with `use_gpu` or with `solver = :gmres`.
+- `phase_reference::Symbol`: Point to which the phase of the amplitudes refers (see
+  `compute_scattering`). `:particle` (default): the unweighted mean of the sphere centres, so
+  the amplitudes do not depend on the coordinate origin of the aggregate files. `:lab`:
+  incident wave at the plane z = 0, the only convention before version 1.3.0. The output file
+  records it in the attribute `phase_reference`. Files without the attribute are taken as
+  `:lab`, and rows of the two conventions cannot share a file.
 - `use_gpu::Bool`: Use GPU-accelerated batched solver via CUDA.jl extension (default false).
   Requires `using CUDA` before calling `run_parameter_sweep`. Implies `use_fft=true`.
 - `gpu_float32::Bool`: Use Float32 precision for GPU BiCG iterations (default false). It has
@@ -99,6 +105,7 @@ Base.@kwdef struct SweepConfig
     fft_near_factor::Float64 = 1.5
     solver::Symbol           = :cbicg   # :cbicg or :gmres
     shared_basis::Bool       = false    # one Krylov basis per (aggregate, medium) group
+    phase_reference::Symbol  = :particle  # :particle (default since 1.3.0) or :lab
     use_gpu::Bool            = false
     gpu_float32::Bool        = false
     # Hybrid GPU+CPU threshold: groups with n_monomers <= gpu_np_threshold are
@@ -210,6 +217,8 @@ function _h5_init!(path::String, config::SweepConfig)
         HDF5.attrs(fid)["fft_near_factor"] = config.fft_near_factor
         # 1 = rows computed with the shared Krylov basis (one truncation order per group)
         HDF5.attrs(fid)["shared_basis"] = config.shared_basis ? 1 : 0
+        # "particle" or "lab": point to which the phase of the amplitudes refers
+        HDF5.attrs(fid)["phase_reference"] = String(config.phase_reference)
 
         for (col, T) in _SWEEP_COLS
             HDF5.create_dataset(fid, col, HDF5.datatype(T),
@@ -258,6 +267,7 @@ Compute scattering for an `AggregateGeometry` object.
 - `k`: wavenumber in the medium, k = 2π × n_medium / λ₀ (same units⁻¹ as agg coordinates)
 - `initial_amn`: if provided, use as initial guess for the iterative solver
   (continuation method for refractive index sweeps)
+- `phase_reference`: `:particle` (default) or `:lab`, as in the method for positions
 
 The function scales `agg.positions` and `agg.radii` by `k` to obtain dimensionless size
 parameters before calling the core solver.
@@ -274,7 +284,8 @@ function compute_scattering(
     solver::Symbol = :cbicg,
     initial_amn::Union{Nothing, Matrix{ComplexF64}} = nothing,
     fft_far_order::Union{Int,Nothing} = nothing,
-    fft_near_factor::Float64 = 1.5
+    fft_near_factor::Float64 = 1.5,
+    phase_reference::Symbol = :particle
 )::Tuple{ScatteringResult, Matrix{ComplexF64}}
     positions_x = agg.positions .* k   # dimensionless (size parameters)
     radii_x     = agg.radii     .* k
@@ -282,7 +293,7 @@ function compute_scattering(
                               use_fft=use_fft, truncation_order=truncation_order,
                               precomputed_fft=precomputed_fft, solver=solver,
                               initial_amn=initial_amn, fft_far_order=fft_far_order,
-                              fft_near_factor=fft_near_factor)
+                              fft_near_factor=fft_near_factor, phase_reference=phase_reference)
 end
 
 # ─────────────────────────────────────────────────────────────
@@ -370,6 +381,19 @@ function _read_shared_basis(path::String)::Bool
     end
 end
 
+"""
+    _read_phase_reference(path::String) -> Symbol
+
+Phase reference of the amplitudes in an existing results file. Files written before this
+attribute existed (versions before 1.3.0) used `:lab`.
+"""
+function _read_phase_reference(path::String)::Symbol
+    return HDF5.h5open(path, "r") do fid
+        a = HDF5.attrs(fid)
+        haskey(a, "phase_reference") ? Symbol(String(a["phase_reference"])) : :lab
+    end
+end
+
 # ─────────────────────────────────────────────────────────────
 # Main sweep function
 # ─────────────────────────────────────────────────────────────
@@ -420,6 +444,7 @@ function run_parameter_sweep(
         return nothing
     end
 
+    _check_phase_reference(config.phase_reference)
     if config.shared_basis
         config.use_gpu && error("shared_basis = true is not available together with use_gpu = true")
         config.solver == :cbicg || error("shared_basis = true needs solver = :cbicg")
@@ -449,6 +474,12 @@ function run_parameter_sweep(
             "$(basename(output_h5)) was written with shared_basis = $(sb_file), " *
             "but this sweep uses shared_basis = $(config.shared_basis). " *
             "Use a different output file.")
+        # The amplitudes of the two conventions differ by exp(i k z_r0).
+        pr_file = _read_phase_reference(output_h5)
+        pr_file == config.phase_reference || error(
+            "$(basename(output_h5)) was written with phase_reference = :$(pr_file), " *
+            "but this sweep uses phase_reference = :$(config.phase_reference). " *
+            "Use a different output file, or set phase_reference = :$(pr_file) to continue it.")
         HDF5.h5open(output_h5, "r") do fid
             if haskey(fid, "source") && size(fid["source"], 1) > 0
                 sources  = read(fid["source"])
@@ -542,7 +573,8 @@ function run_parameter_sweep(
             tol=config.convergence_epsilon, max_iter=config.max_iterations,
             use_fft=effective_use_fft, truncation_order=_order_for(ai0, mci0, mis0[1]),
             solver=config.solver, fft_far_order=config.fft_far_order,
-            fft_near_factor=config.fft_near_factor)  # returns (ScatteringResult, amn); result discarded
+            fft_near_factor=config.fft_near_factor,
+            phase_reference=config.phase_reference)  # returns (ScatteringResult, amn); result discarded
     end
 
     # ── Shared basis: range check and caches for the largest order ──────────
@@ -783,6 +815,7 @@ function run_parameter_sweep(
                 (tol=config.convergence_epsilon, max_iter=config.max_iterations,
                  truncation_order=order_gpu,
                  float32=config.gpu_float32,
+                 phase_reference=config.phase_reference,
                  on_result=_on_gpu_result))
         elseif use_sb_here
             # ── CPU path with one Krylov basis for all refractive indices ──
@@ -791,7 +824,8 @@ function run_parameter_sweep(
                 m_abs_list ./ n_med;
                 tol=config.convergence_epsilon, max_iter=config.max_iterations,
                 use_fft=effective_use_fft, truncation_order=sb_order,
-                precomputed_fft=fft_cache, warn_range=false, max_mie_order=sb_mie)
+                precomputed_fft=fft_cache, warn_range=false, max_mie_order=sb_mie,
+                phase_reference=config.phase_reference)
             Threads.atomic_add!(n_sb_fallback, info_sb.n_fallback)
             for (jj, m_abs) in enumerate(m_abs_list)
                 _record_one!(res_sb[jj], m_abs; force_flush=(jj == length(m_abs_list)))
@@ -807,7 +841,8 @@ function run_parameter_sweep(
                     use_fft=effective_use_fft, truncation_order=_order_for(ai, mci, mi),
                     precomputed_fft=fft_cache, solver=config.solver,
                     initial_amn=prev_amn, fft_far_order=config.fft_far_order,
-                    fft_near_factor=config.fft_near_factor)
+                    fft_near_factor=config.fft_near_factor,
+                    phase_reference=config.phase_reference)
                 prev_amn = amn_out
                 _record_one!(r, m_abs)
             end
@@ -894,6 +929,7 @@ function _write_sweep_hdf5(df::DataFrame, path::String, config::SweepConfig)
         HDF5.attrs(fid)["m_real_range"]    = Float64[config.m_real_range...]
         HDF5.attrs(fid)["m_imag_range"]    = Float64[config.m_imag_range...]
         HDF5.attrs(fid)["n_jobs"]          = nrow(df)
+        HDF5.attrs(fid)["phase_reference"] = String(config.phase_reference)
 
         # Write each column as a 1-D dataset
         for col in names(df)

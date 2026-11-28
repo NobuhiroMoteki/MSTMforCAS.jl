@@ -50,6 +50,10 @@ Options:
   --part I/N           : process only the aggregates with index ≡ I-1 (mod N). Use it to split
                          the work between machines. Each part writes its own output file.
   --tag TAG            : tag in the output file name (default "regen")
+  --phase-reference R  : particle (default) or lab. Point to which the phase of the amplitudes
+                         refers (see compute_scattering). lab is the convention before
+                         MSTMforCAS.jl 1.3.0. An existing output file written with the other
+                         convention is refused: resume a file of an earlier version with lab.
 
 Output: data/results/results_fullsweep_agg<ID>_<TAG>[_partIofN].h5
 """
@@ -75,6 +79,8 @@ shared_basis = "--shared-basis" in ARGS
 shared_basis && use_gpu && error("--shared-basis is not available with --gpu or --float32")
 truncation_eps = (v = _arg("--truncation-eps", nothing); v === nothing ? nothing : parse(Float64, v))
 fft_far_order  = (v = _arg("--fft-far-order", nothing); v === nothing ? nothing : parse(Int, v))
+phase_reference = Symbol(_arg("--phase-reference", "particle"))
+phase_reference in (:particle, :lab) || error("--phase-reference must be particle or lab")
 preset  = _arg("--preset", "core")
 ri_step = parse(Float64, _arg("--ri-step", "0.05"))
 wl_sel  = parse.(Float64, split(_arg("--wl", "0.834,0.638,0.453"), ","))
@@ -148,7 +154,8 @@ println()
 # ─── Run one sweep per wavelength ────────────────────────────────────────────
 println("Preset: $preset, threads: $(Threads.nthreads()), use_gpu: $use_gpu, gpu_float32: $gpu_float32, " *
         "truncation_order: $truncation_order, truncation_eps: $(repr(truncation_eps)), " *
-        "fft_far_order: $(repr(fft_far_order)), shared_basis: $shared_basis")
+        "fft_far_order: $(repr(fft_far_order)), shared_basis: $shared_basis, " *
+        "phase_reference: $phase_reference")
 n_total = sum(length(aggregates) * n_ri(wl) for wl in wl_sel)
 println("Total jobs: $n_total")
 println()
@@ -166,6 +173,7 @@ for wl in wl_sel, (m_real_range, m_imag_range) in ri_grids[wl]
         truncation_eps      = truncation_eps,
         fft_far_order       = fft_far_order,
         shared_basis        = shared_basis,
+        phase_reference     = phase_reference,
         use_gpu             = use_gpu,
         gpu_float32         = gpu_float32,
         gpu_np_threshold    = 500,

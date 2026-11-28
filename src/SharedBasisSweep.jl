@@ -254,6 +254,7 @@ one Krylov basis shared by all of them.
 - `max_mie_order`: largest single-sphere Mie order over the spheres and `m_rels`, for callers
   that have computed it already. A larger value is allowed. Default `nothing`: it is
   determined here.
+- `phase_reference`: `:particle` (default) or `:lab`, as in `compute_scattering`
 
 # Returns
 - `results::Vector{ScatteringResult}`: one entry per element of `m_rels`. `converged` is true
@@ -295,8 +296,10 @@ function sweep_refractive_index(
     correction_terms::Int = 2,
     fallback::Bool = true,
     warn_range::Bool = true,
-    max_mie_order::Union{Int,Nothing} = nothing
+    max_mie_order::Union{Int,Nothing} = nothing,
+    phase_reference::Symbol = :particle
 )
+    _check_phase_reference(phase_reference)
     N  = length(radii)
     nm = length(m_rels)
     size(positions) == (3, N) || throw(ArgumentError("positions must have shape (3, N)"))
@@ -328,7 +331,8 @@ function sweep_refractive_index(
             results[j], prev_amn = compute_scattering(positions, radii, m_rels[j];
                 tol=tol, max_iter=max_iter, use_fft=use_fft && N >= 2, truncation_order=order,
                 precomputed_fft=precomputed_fft, initial_amn=prev_amn,
-                fft_far_order=fft_far_order, fft_near_factor=fft_near_factor)
+                fft_far_order=fft_far_order, fft_near_factor=fft_near_factor,
+                phase_reference=phase_reference)
         end
         info = (method = :independent, truncation_order = order, basis_size = (0, 0),
                 relres = fill(NaN, nm, 2), n_fallback = 0, model_residual = NaN,
@@ -552,6 +556,7 @@ function sweep_refractive_index(
     A1 = zeros(ComplexF64, hnb0, Kmax, 2)             # mode-1 coefficients of V_q[:, k]
     A2 = zeros(ComplexF64, hnb0, Kmax, 2)             # mode-2 coefficients of V_q[:, k]
     _merge_basis_to_origin!(A1, A2, Vs, Ks, positions, r0, order, ntrani)
+    ph = _phase_reference_factor(r0, phase_reference)   # applied to the basis rows only
     Vp = [view(Vs[q], :, 1:Ks[q])' * view(rhs, :, q) for q in 1:2]   # V_q' p_q
 
     lap!(:basis_outputs)
@@ -592,8 +597,8 @@ function sweep_refractive_index(
             Q_sca = norm_fac * (sum(abs2, c1) + sum(abs2, c2)) / 2
             sa_fwd = _amplitude_from_mode_coefs(c1, c2, nodrt, true)
             sa_bwd = _amplitude_from_mode_coefs(c1, c2, nodrt, false)
-            results[j] = ScatteringResult(ntuple(i -> -2 * sa_fwd[i], 4),
-                                          ntuple(i -> -2 * sa_bwd[i], 4),
+            results[j] = ScatteringResult(ntuple(i -> -2 * ph * sa_fwd[i], 4),
+                                          ntuple(i -> -2 * ph * sa_bwd[i], 4),
                                           Q_ext, Q_ext - Q_sca, Q_sca, ok, Kmax, order)
         else
             n_fallback += 1
@@ -603,7 +608,8 @@ function sweep_refractive_index(
             end
             r, _ = compute_scattering(positions, radii, m_rels[j]; tol=tol, max_iter=max_iter,
                                       use_fft=use_fft, truncation_order=order,
-                                      precomputed_fft=fft_data, initial_amn=x0)
+                                      precomputed_fft=fft_data, initial_amn=x0,
+                                      phase_reference=phase_reference)
             results[j] = ScatteringResult(r.S_forward, r.S_backward, r.Q_ext, r.Q_abs, r.Q_sca,
                                           r.converged, Kmax + r.n_iterations, r.truncation_order)
         end

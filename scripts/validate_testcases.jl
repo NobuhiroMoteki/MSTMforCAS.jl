@@ -1,6 +1,9 @@
 """
 Validate Julia MSTM against Fortran reference outputs for testcase1, testcase2, and testcase3.
 Run with: julia --project=. scripts/validate_testcases.jl
+
+The Fortran code phases the incident wave at the lab plane z = 0, so the comparison uses
+phase_reference = :lab. The geometry of testcases 2 and 3 has its mean centre at z = -0.108.
 """
 
 using MSTMforCAS, Printf, DelimitedFiles
@@ -19,7 +22,7 @@ radii_1 = [0.2*7.534, 0.2*7.534]
 m_rel_1  = ComplexF64(1.58, 0.05)
 
 t0 = time()
-res1, _ = compute_scattering(positions_1, radii_1, m_rel_1)
+res1, _ = compute_scattering(positions_1, radii_1, m_rel_1; phase_reference=:lab)
 dt1 = time() - t0
 
 println("Elapsed: $(round(dt1, digits=2)) s, converged=$(res1.converged), iters=$(res1.n_iterations), truncation_order=$(res1.truncation_order)")
@@ -78,7 +81,7 @@ m_rel_2  = ComplexF64(1.6, 0.0123)
 println("N spheres = $N2, x per sphere = $(radii_2[1])")
 
 t0 = time()
-res2, _ = compute_scattering(positions_2, radii_2, m_rel_2)
+res2, _ = compute_scattering(positions_2, radii_2, m_rel_2; phase_reference=:lab)
 dt2 = time() - t0
 
 println("Elapsed: $(round(dt2, digits=1)) s, converged=$(res2.converged), iters=$(res2.n_iterations), truncation_order=$(res2.truncation_order)")
@@ -131,7 +134,7 @@ println("=" ^ 60)
 println("N spheres = $N2, x per sphere = $(radii_2[1]), use_fft=true")
 
 t0 = time()
-res3, _ = compute_scattering(positions_2, radii_2, m_rel_2; use_fft=true)
+res3, _ = compute_scattering(positions_2, radii_2, m_rel_2; use_fft=true, phase_reference=:lab)
 dt3 = time() - t0
 
 println("Elapsed: $(round(dt3, digits=1)) s, converged=$(res3.converged), iters=$(res3.n_iterations), truncation_order=$(res3.truncation_order)")

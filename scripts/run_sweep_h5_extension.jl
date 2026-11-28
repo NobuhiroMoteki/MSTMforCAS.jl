@@ -73,6 +73,8 @@ function make_config(m_real_range, m_imag_range)
         convergence_epsilon = 1e-6,
         use_fft             = use_fft,
         truncation_order    = truncation_order,
+        # The file this extends was computed before MSTMforCAS.jl 1.3.0 (phase at z = 0).
+        phase_reference     = :lab,
         use_gpu             = use_gpu,
         gpu_float32         = gpu_float32,
         gpu_np_threshold    = 500,

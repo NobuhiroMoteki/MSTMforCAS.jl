@@ -72,6 +72,9 @@ const MEDIUM_CONDITIONS =
     PRESET == "liquid" ? [(0.637, 1.3315), (0.773, 1.3300)] :
     error("unknown preset $(PRESET) (use 'air' or 'liquid')")
 const OUT_FILE = _cli_arg("--output", joinpath(@__DIR__, "mstm_sampled_$(PRESET).h5"))
+# particle (default since MSTMforCAS.jl 1.3.0) or lab (see cluster_forward_amplitudes)
+const PHASE_REFERENCE = Symbol(_cli_arg("--phase-reference", "particle"))
+PHASE_REFERENCE in (:particle, :lab) || error("--phase-reference must be particle or lab")
 
 # ── SETTINGS (tiny example; edit for a real sweep) ───────────────────────────
 # built-in example aggregate: 4 monomers, radius R_MON [um], non-overlapping
@@ -101,6 +104,7 @@ const CONFIG = Dict{String,Any}(
     "m_real_vals"       => Float64.(M_REAL_VALS),
     "m_imag_vals"       => Float64.(M_IMAG_VALS),
     "n_orient"          => length(ORIENTATIONS),
+    "phase_reference"   => String(PHASE_REFERENCE),
 )
 
 println("MSTM sampled-table producer  preset=$(PRESET)  → $(OUT_FILE)")
@@ -127,7 +131,8 @@ for (wl, m_m) in MEDIUM_CONDITIONS
         T_cl, nodrt, r0, converged = build_cluster_tmatrix(pos_dl, rad_dl, m_rel)
         @printf("  [g%d] wl=%.3f m_p=%.2f+%.2fi  nodrt=%d conv=%s\n", gid, wl, mr, mi, nodrt, converged)
         for (α, β, γ) in ORIENTATIONS
-            S1, S2, S3, S4 = cluster_forward_amplitudes(T_cl, nodrt, r0, α, β, γ)
+            S1, S2, S3, S4 = cluster_forward_amplitudes(T_cl, nodrt, r0, α, β, γ;
+                                                        phase_reference = PHASE_REFERENCE)
             # BH83 -> MI02 (dimensional) -> CAS-v2 (Moteki & Adachi 2024)
             S11 = S2 / (-ik); S22 = S1 / (-ik); S12 = S3 / ik; S21 = S4 / ik
             Ss = S11 + im * S12
@@ -147,6 +152,7 @@ end
 h5open(OUT_FILE, "w") do f
     attrs(f)["species_kind"] = "aggregate"
     attrs(f)["sampling"] = "grid(m_p) x fixed orientation set; one geometry"
+    attrs(f)["phase_reference"] = String(PHASE_REFERENCE)
     write_dataset(f, "row_id", row_id)
     write_dataset(f, "geometry_id", geometry_id)
     write_dataset(f, "wl_0", wl_c);   write_dataset(f, "m_m", mm_c)
